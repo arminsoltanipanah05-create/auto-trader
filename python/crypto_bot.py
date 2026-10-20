@@ -192,6 +192,19 @@ def rebalance(send: bool = False) -> None:
                  if p.asset_class == "crypto" or "/" in (p.symbol or "")}
     held = {s.replace("/", ""): v for s, v in positions.items()}
 
+    # Alpaca crypto is cash-only: margin buying power is not spendable here.
+    # The ETF book's shorts lock up most of the cash as collateral, so the
+    # sleeve has to be sized from what is actually free, not from the vol target.
+    held_crypto = sum(abs(v) for v in held.values())
+    free_cash = float(getattr(acct, "non_marginable_buying_power", 0.0) or 0.0)
+    budget = held_crypto + max(free_cash, 0.0)
+    desired = float(tgt_w.sum()) * equity
+    if desired > 0 and desired > budget * 0.98:
+        scale = budget * 0.98 / desired
+        tgt_w = tgt_w * scale
+        print(f"cash-constrained: sleeve {desired / equity:.2%} -> {tgt_w.sum():.2%} "
+              f"(free cash ${free_cash:,.0f}, crypto held ${held_crypto:,.0f})")
+
     plan = []
     for sym in tgt_w.index:
         want = float(tgt_w[sym]) * equity
