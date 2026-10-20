@@ -175,20 +175,23 @@ def live_targets(px: pd.DataFrame) -> pd.Series:
 
 
 def rebalance(send: bool = False) -> None:
-    from alpaca.trading.client import TradingClient
-    from alpaca.trading.enums import OrderSide, TimeInForce
-    from alpaca.trading.requests import MarketOrderRequest
+    import broker as brokermod
+    import cfg as cfgmod
+    from pre_trade import GuardError, TradeIntent
 
-    client = TradingClient(os.environ["APCA_API_KEY_ID"],
-                           os.environ["APCA_API_SECRET_KEY"], paper=True)
-    acct = client.get_account()
+    cfg = cfgmod.load()
+    # Orders leave this function only through GuardedBroker.submit(), which
+    # runs the pre-trade gate (CoinGecko freshness, broker spread, liquidity,
+    # 1% risk, 2:1 reward/risk) before the broker client is touched.
+    guard = brokermod.connect(cfg=cfg, paper=True)
+    acct = guard.account()
     equity = float(acct.equity)
 
     px = price_panel(UNIVERSE, 400).ffill().dropna(how="all")
     tgt_w = live_targets(px)
     last_px = px.ffill().iloc[-1]
 
-    positions = {p.symbol: float(p.market_value) for p in client.get_all_positions()
+    positions = {p.symbol: float(p.market_value) for p in guard.positions()
                  if p.asset_class == "crypto" or "/" in (p.symbol or "")}
     held = {s.replace("/", ""): v for s, v in positions.items()}
 
@@ -244,6 +247,12 @@ def rebalance(send: bool = False) -> None:
 
     # sells first: spot crypto buys need the cash back before it can be reused
     plan.sort(key=lambda x: x[1])
+
+    # Daily sigma from the panel already in memory. Levels, as in the ETF book,
+    # come from the volatility model rather than from a discretionary view.
+    rets = px.pct_change().dropna()
+    sigma = rets.tail(30).std()
+
     failed = []
     for sym, delta, price in plan:
         px_now = price if price == price else float(last_px.get(sym, 0))
@@ -253,15 +262,34 @@ def rebalance(send: bool = False) -> None:
         qty = round(abs(delta) / px_now, 8)
         if qty <= 0:
             continue
-        req = MarketOrderRequest(
+
+        side = "buy" if delta > 0 else "sell"
+        dist = 2.0 * max(float(sigma.get(sym, 0.0) or 0.0), 0.01)
+        if side == "buy":
+            stop, target = px_now * (1 - dist), px_now * (1 + 2.5 * dist)
+        else:
+            stop, target = px_now * (1 + dist), px_now * (1 - 2.5 * dist)
+
+        intent = TradeIntent(
             symbol=sym,
+            asset_class="crypto",
+            side=side,
             qty=qty,
-            side=OrderSide.BUY if delta > 0 else OrderSide.SELL,
-            time_in_force=TimeInForce.GTC,
+            reason=(f"crypto momentum rebalance: target "
+                    f"{float(tgt_w.get(sym, 0.0)):.2%} of equity vs "
+                    f"${abs(delta) + abs(positions.get(sym, 0.0)):,.0f} held"),
+            invalidation=f"daily close beyond {stop:,.4f} (2 sigma stop)",
+            stop=stop,
+            target=target,
+            fees_bps=25.0,
+            slippage_bps=30.0,
         )
         try:
-            o = client.submit_order(req)
+            o = guard.submit(intent, equity=equity)
             print(f"  submitted {o.symbol} {o.side.value} {o.qty} id={o.id}")
+        except GuardError as exc:
+            failed.append((sym, f"{exc.code}: {exc.detail}"))
+            print(f"  BLOCKED {sym}: {exc.code} — {exc.detail}")
         except Exception as exc:  # noqa: BLE001
             failed.append((sym, str(exc)[:160]))
             print(f"  FAILED  {sym}: {str(exc)[:160]}")

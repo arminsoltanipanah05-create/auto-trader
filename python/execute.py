@@ -23,22 +23,23 @@ import sys
 
 import pandas as pd
 
+import broker as brokermod
 import cfg as cfgmod
 import risk
+from pre_trade import GuardError, TradeIntent
 
 OUT = pathlib.Path(__file__).resolve().parent / "output"
 PAPER_HOST = "https://paper-api.alpaca.markets"
 LIVE_HOST = "https://api.alpaca.markets"
 
-
-def _client(paper: bool):
-    from alpaca.trading.client import TradingClient  # noqa: PLC0415
-
-    key = os.environ.get("APCA_API_KEY_ID")
-    secret = os.environ.get("APCA_API_SECRET_KEY")
-    if not key or not secret:
-        raise SystemExit("Set APCA_API_KEY_ID and APCA_API_SECRET_KEY first.")
-    return TradingClient(key, secret, paper=paper)
+# Stop at two daily sigma; target at 2.5x that distance.  The extra half-sigma
+# is a buffer, not extra edge: the guard prices a buy at the ask and a sell at
+# the bid, which shortens reward and lengthens risk by roughly the spread. With
+# a 2.5x multiple the realised reward/risk stays above 2:1 on every venue we
+# trade.  The guard re-checks the real number from the broker quote anyway.
+STOP_SIGMA = 2.0
+TARGET_MULT = 2.5
+MIN_SIGMA = 0.005          # 0.5% daily floor, so a quiet tape cannot shrink stops to noise
 
 def _order_id(date: str, ticker: str, side: str, qty: int) -> str:
     raw = f"dmn-{date}-{ticker}-{side}-{qty}".encode()
@@ -88,8 +89,11 @@ def main() -> None:
         print("  LIVE TRADING — REAL MONEY — paper=false, --live passed")
         print("=" * 60)
 
-    client = _client(paper)
-    account = client.get_account()
+    # Every order goes through broker.GuardedBroker: market data, spread,
+    # liquidity, risk and (for live) an approval token are checked before the
+    # broker client is touched.  This module never holds a broker client.
+    guard = brokermod.connect(cfg=cfg, paper=paper)
+    account = guard.account()
     equity = float(account.equity)
     print(f"Account {account.account_number}  equity {equity:,.2f}  status {account.status}")
 
@@ -108,7 +112,7 @@ def main() -> None:
     # would close the entire sleeve on the next rebalance.
     held = {
         p.symbol: float(p.market_value)
-        for p in client.get_all_positions()
+        for p in guard.positions()
         if str(getattr(p.asset_class, "value", p.asset_class)) == "us_equity"
     }
     targets = {row.ticker: float(row.position) * equity for row in todays.itertuples()}
@@ -175,21 +179,59 @@ def main() -> None:
         print(f"\nDRY RUN ({mode} endpoint) — nothing sent. Add --send to submit.")
         return
 
-    from alpaca.trading.enums import OrderSide, TimeInForce  # noqa: PLC0415
-    from alpaca.trading.requests import MarketOrderRequest  # noqa: PLC0415
+    # Realised daily sigma per leg, used to place stop and target.  A rebalance
+    # has no discretionary stop, so the levels come from the same volatility
+    # model that sized the position.
+    sigma: dict[str, float] = {}
+    if sized:
+        from alpaca.data.requests import StockBarsRequest  # noqa: PLC0415
+        from alpaca.data.timeframe import TimeFrame  # noqa: PLC0415
+
+        start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=70)
+        try:
+            frame = data_client.get_stock_bars(
+                StockBarsRequest(
+                    symbol_or_symbols=sorted({t for t, _, _, _ in sized}),
+                    timeframe=TimeFrame.Day,
+                    start=start,
+                )
+            )
+            for sym in {t for t, _, _, _ in sized}:
+                closes = pd.Series([float(b.close) for b in frame[sym]]).dropna()
+                rets = closes.pct_change().dropna().tail(30)
+                if len(rets) >= 5:
+                    sigma[sym] = float(rets.std())
+        except Exception as exc:  # noqa: BLE001
+            print(f"  volatility unavailable ({type(exc).__name__}); using the floor")
 
     failed = []
     for ticker, side, qty, px in sized:
-        req = MarketOrderRequest(
+        dist = STOP_SIGMA * max(sigma.get(ticker, 0.0), MIN_SIGMA)
+        if side == "buy":
+            stop, target = px * (1 - dist), px * (1 + TARGET_MULT * dist)
+        else:
+            stop, target = px * (1 + dist), px * (1 - TARGET_MULT * dist)
+
+        intent = TradeIntent(
             symbol=ticker,
-            qty=qty,
-            side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-            time_in_force=TimeInForce.DAY,
+            asset_class="us_equity",
+            side=side,
+            qty=float(qty),
+            reason=(f"TSMOM rebalance: target ${targets.get(ticker, 0.0):,.0f} "
+                    f"vs held ${held.get(ticker, 0.0):,.0f}"),
+            invalidation=f"daily close beyond {stop:,.2f} ({STOP_SIGMA:g} sigma stop)",
+            stop=stop,
+            target=target,
+            fees_bps=0.0,
+            slippage_bps=5.0,
             client_order_id=_order_id(str(latest), ticker, side, qty),
         )
         try:
-            o = client.submit_order(req)
+            o = guard.submit(intent, equity=equity)
             print(f"  submitted {o.symbol} {o.side.value} {o.qty} sh id={o.client_order_id}")
+        except GuardError as exc:
+            failed.append((ticker, f"{exc.code}: {exc.detail}"))
+            print(f"  BLOCKED {ticker}: {exc.code} — {exc.detail}")
         except Exception as exc:  # noqa: BLE001
             failed.append((ticker, str(exc)[:200]))
             print(f"  FAILED  {ticker}: {str(exc)[:200]}")

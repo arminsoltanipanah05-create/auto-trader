@@ -6,6 +6,22 @@ session. If a request conflicts with this file, the agent must say so and stop.
 
 ---
 
+## Enforcement status
+
+This rule is **implemented in code**, not just written here:
+
+| Piece | Where |
+|---|---|
+| Gate logic (data, spread, liquidity, risk, RR) | `python/pre_trade.py` |
+| The only `client.submit_order` call | `python/broker.py` (`GuardedBroker.submit`) |
+| Callers | `python/execute.py`, `python/crypto_bot.py` — both use `guard.submit()` |
+| Tests proving blocked orders never reach the broker | `python/tests/test_pretrade.py` |
+| Settings | `[pretrade]` in `python/config.toml` |
+
+If code and this document ever disagree, the code is what executes; fix the code.
+
+---
+
 ## MANDATORY PRE-TRADE GATE
 
 Before **proposing, placing or closing any BUY or SELL order**, the agent must

@@ -53,3 +53,25 @@ dry_run = true                # print orders without sending them
 max_daily_loss_pct = 0.03
 max_gross_exposure = 0.6      # ETF book only. Shrunk from 1.0 to free cash for
                               # the crypto sleeve, which is cash-only on Alpaca.
+
+[pretrade]
+# Mandatory gate in pre_trade.py / broker.py. Applies to every BUY and SELL.
+# Setting enabled = false does NOT bypass the guard: it raises guard_disabled
+# and blocks every order. Fail closed by construction.
+enabled = true
+
+max_data_age_sec = 60           # broker quote age before submit
+max_market_age_sec = 180        # CoinGecko last_updated age. Measured: the public feed advances every 60-140s, so 60s blocked almost every crypto order. Execution freshness is governed by max_data_age_sec (the broker quote).
+max_price_divergence_pct = 1.0  # CoinGecko vs broker mid
+max_spread_bps_equity = 25.0
+max_spread_bps_crypto = 100.0
+max_position_pct_of_volume = 0.5   # crypto: order <= 0.5% of 24h volume
+max_depth_fraction = 0.25          # equities: order <= 25% of top-of-book depth
+max_risk_pct = 1.0
+min_reward_risk = 2.0
+max_cost_bps = 100.0            # fees + expected slippage
+
+# CoinGecko has no US-equity coverage, so only crypto is required to have a
+# snapshot. Add "us_equity" here to make unmapped equity orders fail closed too.
+coingecko_required_classes = ["crypto"]
+coingecko_api = "https://api.coingecko.com/api/v3"
