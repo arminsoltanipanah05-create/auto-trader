@@ -32,7 +32,9 @@ DAYS = 365
 
 LOOKBACK = 30
 TARGET_VOL = 0.30          # annualised, on the crypto sleeve
-CRYPTO_GROSS_CAP = 0.35    # hard ceiling: never more than 35% of equity deployed
+CRYPTO_GROSS_CAP = 0.70    # hard ceiling. The vol target currently sizes the
+                           # sleeve at ~0.62, so this cap does not bind; it is
+                           # a backstop, not the sizing mechanism.
 DUST_USD = 10.0
 
 UNIVERSE = [
