@@ -53,7 +53,16 @@ def main() -> None:
     ap.add_argument("--live", action="store_true",
                     help="override config and use the LIVE endpoint (real money)")
     ap.add_argument("--max-age-days", type=int, default=5)
+    ap.add_argument("--approval", action="append", default=[], metavar="SYMBOL=TOKEN",
+                    help="single-use approval token for a live order (repeat per leg)")
     args = ap.parse_args()
+
+    approvals = {}
+    for pair in args.approval:
+        symbol, _, token = pair.partition("=")
+        if not token:
+            raise SystemExit(f"--approval expects SYMBOL=TOKEN, got {pair!r}")
+        approvals[symbol.strip()] = token.strip()
 
     cfg = cfgmod.load()
     paper = cfg["execution"].get("paper", True)
@@ -225,6 +234,7 @@ def main() -> None:
             fees_bps=0.0,
             slippage_bps=5.0,
             client_order_id=_order_id(str(latest), ticker, side, qty),
+            approval_token=approvals.get(ticker),
         )
         try:
             o = guard.submit(intent, equity=equity)

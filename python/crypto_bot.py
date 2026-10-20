@@ -174,7 +174,8 @@ def live_targets(px: pd.DataFrame) -> pd.Series:
     return w.clip(lower=0.0)
 
 
-def rebalance(send: bool = False) -> None:
+def rebalance(send: bool = False, approvals: dict | None = None) -> None:
+    approvals = approvals or {}
     import broker as brokermod
     import cfg as cfgmod
     from pre_trade import GuardError, TradeIntent
@@ -283,6 +284,7 @@ def rebalance(send: bool = False) -> None:
             target=target,
             fees_bps=25.0,
             slippage_bps=30.0,
+            approval_token=approvals.get(sym),
         )
         try:
             o = guard.submit(intent, equity=equity)
@@ -307,12 +309,21 @@ def main() -> None:
     ap.add_argument("--days", type=int, default=1200)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--send", action="store_true")
+    ap.add_argument("--approval", action="append", default=[], metavar="SYMBOL=TOKEN",
+                    help="single-use approval token for a live order (repeat per leg)")
     args = ap.parse_args()
+
+    approvals = {}
+    for pair in args.approval:
+        symbol, _, token = pair.partition("=")
+        if not token:
+            raise SystemExit(f"--approval expects SYMBOL=TOKEN, got {pair!r}")
+        approvals[symbol.strip()] = token.strip()
 
     if args.backtest:
         backtest(args.days)
     elif args.send:
-        rebalance(send=True)
+        rebalance(send=True, approvals=approvals)
     else:
         rebalance(send=False)
 
