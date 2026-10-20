@@ -14,7 +14,7 @@ trading twice.
 | Workflow | Schedule (UTC) | Purpose |
 |---|---|---|
 | `paper-rebalance` | 19:30, 20:00, 20:30, 21:00 Mon–Fri | daily ETF book |
-| `crypto-rebalance` | 00:05, 04:05, 08:05, 12:05, 16:05, 20:05 daily | crypto sleeve |
+| `crypto-rebalance` | hourly at :05 | crypto sleeve |
 
 Each run boots a fresh Ubuntu machine, installs dependencies (~40 s), trades,
 and disappears. Nothing is stored between runs except one file:

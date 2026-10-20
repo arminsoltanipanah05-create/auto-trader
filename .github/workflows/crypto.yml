@@ -1,12 +1,16 @@
 name: crypto-rebalance
 
-# 24/7 crypto sleeve. Crypto never closes, so this runs every four hours with
-# no market gate - only the kill switch and the position drift check inside the
-# script stand between the schedule and an order.
+# 24/7 crypto sleeve. Crypto never closes, so this runs hourly with no market
+# gate - only the kill switch and the position-drift band inside the script
+# stand between the schedule and an order.
+#
+# Hourly CHECKS, daily SIGNAL. Tested: hourly signals turn over 870-2254x a
+# year and lose 43-99% annually after costs (see python/fast_test.py). The
+# tempo of the edge is ~30 days, so more checks only mean faster drift repair.
 
 on:
   schedule:
-    - cron: '5 */4 * * *'
+    - cron: '5 * * * *'
   workflow_dispatch:
 
 permissions:
