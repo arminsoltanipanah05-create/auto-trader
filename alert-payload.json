@@ -1,0 +1,11 @@
+{
+  "_comment": "TradersPost webhook body. Confirm the exact field names in your TradersPost webhook builder before going live — their schema changes.",
+  "ticker": "{{ticker}}",
+  "action": "buy",
+  "sentiment": "bullish",
+  "quantityType": "percent",
+  "quantity": "5",
+  "orderType": "market",
+  "timeInForce": "day",
+  "signalPrice": "{{close}}"
+}

@@ -1,0 +1,63 @@
+//@version=6
+// ============================================================
+// TSMOM — volatility-scaled time-series momentum
+// This is the BASELINE from Lim, Zohren & Roberts (2019),
+// "Enhancing Time Series Momentum Strategies Using Deep
+// Neural Networks". It is NOT the Deep Momentum Network.
+//
+// Long/short a single symbol. Run one instance per ETF.
+// Requires a margin account on the broker side if you mirror
+// it live (shorts + leverage).
+// ============================================================
+strategy("TSMOM baseline",
+     overlay=true,
+     initial_capital=100000,
+     default_qty_type=strategy.fixed,
+     default_qty_value=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.02,
+     slippage=2,
+     process_orders_on_close=true,
+     calc_on_every_tick=false,
+     pyramiding=0)
+
+// ---------------- inputs ----------------
+lookback  = input.int(60,    "Momentum lookback (days)", minval=10)
+volLen    = input.int(60,    "Volatility window (days)",  minval=20)
+targetVol = input.float(15.0, "Target vol % annualised",  minval=1.0, maxval=60.0, step=0.5)
+maxLev    = input.float(1.0,  "Max leverage",             minval=0.1, maxval=2.0, step=0.1)
+minScale  = input.float(0.05, "Min scale to trade",       minval=0.0, step=0.01)
+
+// ---------------- volatility estimate ----------------
+ret    = close / close[1] - 1.0
+sigma  = ta.stdev(ret, volLen) * math.sqrt(252)
+scale  = sigma > 0 ? (targetVol / 100.0) / sigma : 0.0
+scale := math.min(scale, maxLev)
+scale := scale < minScale ? 0.0 : scale
+
+// ---------------- trend signal ----------------
+// Sign of the cumulative return over the lookback window.
+mom    = close / close[lookback] - 1.0
+dir    = mom > 0 ? 1 : mom < 0 ? -1 : 0
+
+// ---------------- target position ----------------
+// Notional = equity * vol scale * direction, converted to shares.
+tgtNotional = strategy.equity * scale * dir
+tgtQty      = close > 0 ? tgtNotional / close : 0.0
+
+// Rebalance monthly, or immediately when the sign flips.
+newMonth   = ta.change(time("M")) != 0
+signFlip   = dir != nz(dir[1])
+doRebalance = (newMonth or signFlip) and barstate.isconfirmed
+
+if doRebalance
+    strategy.close_all(comment = "Rebalance")
+    if math.abs(tgtQty) >= 1
+        if dir > 0
+            strategy.entry("Long", strategy.long, qty = math.floor(math.abs(tgtQty)))
+        else
+            strategy.entry("Short", strategy.short, qty = math.floor(math.abs(tgtQty)))
+
+// ---------------- diagnostics ----------------
+plot(scale * dir, "Position scale", color = color.new(color.teal, 0), style = plot.style_area)
+hline(0, "Flat", color = color.new(color.gray, 60))

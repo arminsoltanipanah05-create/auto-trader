@@ -1,0 +1,71 @@
+//@version=6
+// ============================================================
+// Trend Pullback  —  TEMPLATE
+// Daily bars, single symbol, long-only. This is a scaffold, not
+// a validated edge. Backtest it before trusting it.
+// ============================================================
+strategy("Trend Pullback",
+     overlay=true,
+     initial_capital=25000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=10,
+     commission_type=strategy.commission.cash_per_order,
+     commission_value=0,
+     slippage=2,
+     calc_on_every_tick=false,
+     process_orders_on_close=true)
+
+// ---------------- inputs ----------------
+fastLen  = input.int(20,    "Fast SMA",        minval=2)
+slowLen  = input.int(50,    "Slow SMA",        minval=5)
+trendLen = input.int(200,   "Trend SMA",       minval=20)
+rsiLen   = input.int(2,     "Pullback RSI len", minval=2)
+rsiBuy   = input.float(10,  "RSI threshold",   minval=1, maxval=50)
+atrLen   = input.int(14,    "ATR length",      minval=2)
+atrMult  = input.float(2.0, "ATR stop mult",   minval=0.5, step=0.1)
+rrMult   = input.float(2.0, "Reward:Risk",     minval=0.5, step=0.1)
+riskPct  = input.float(1.0, "Risk % of equity", minval=0.1, maxval=5.0, step=0.1)
+
+// ---------------- indicators ----------------
+fast  = ta.sma(close, fastLen)
+slow  = ta.sma(close, slowLen)
+trend = ta.sma(close, trendLen)
+rsi   = ta.rsi(close, rsiLen)
+atr   = ta.atr(atrLen)
+
+// ---------------- conditions ----------------
+// Long only when the bigger trend is up.
+uptrend  = close > trend and slow > trend
+
+// Two ways in: an oversold dip inside an uptrend, or a reclaim
+// of the fast average after price was below it.
+dip      = rsi < rsiBuy
+reclaim  = ta.crossover(close, fast)
+
+flat     = strategy.position_size == 0
+longCond = uptrend and (dip or reclaim) and flat
+
+// ---------------- entry + risk ----------------
+if longCond
+    stopDist = atr * atrMult
+    // Size so that hitting the stop loses roughly riskPct of equity.
+    qty = math.floor((strategy.equity * riskPct / 100) / stopDist)
+    if qty > 0 and stopDist > 0
+        strategy.entry("Long", strategy.long, qty=qty)
+        strategy.exit("Exit", from_entry="Long",
+             stop  = close - stopDist,
+             limit = close + stopDist * rrMult)
+
+// ---------------- exits ----------------
+// Give up on the trade if the medium trend breaks.
+if strategy.position_size > 0 and close < slow
+    strategy.close("Long", comment="Trend exit")
+
+// Hard time stop so dead trades don't squat in the account.
+if strategy.position_size > 0 and bar_index - strategy.opentrades.entry_bar_index(0) > 60
+    strategy.close("Long", comment="Time exit")
+
+// ---------------- plots ----------------
+plot(fast,  "Fast",  color=color.new(color.blue,   0))
+plot(slow,  "Slow",  color=color.new(color.orange, 0))
+plot(trend, "Trend", color=color.new(color.red,    0), linewidth=2)

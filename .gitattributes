@@ -1,0 +1,9 @@
+# Git for Windows defaults to CRLF; the workflow runners are Linux and will not
+# execute a shell script that has carriage returns in it.
+* text=auto
+*.sh  text eol=lf
+*.py  text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.md  text eol=lf
+*.ps1 text eol=crlf

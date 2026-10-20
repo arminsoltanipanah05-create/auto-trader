@@ -1,0 +1,10 @@
+[Unit]
+Description=Four-hourly crypto rebalance
+
+[Timer]
+OnCalendar=*-*-* 00,04,08,12,16,20:05:00
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

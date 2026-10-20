@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily paper rebalance window check
+
+[Timer]
+# Every 15 minutes from 20:00 to 22:59 UTC on weekdays. The US close is 20:00
+# UTC in summer and 21:00 UTC in winter; the gate inside paper_gate.py picks the
+# run that lands within 45 minutes of the close, so DST needs no changes here.
+OnCalendar=Mon..Fri *-*-* 20..22:00/15:00
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

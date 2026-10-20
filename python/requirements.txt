@@ -1,0 +1,11 @@
+# Research pipeline (works on Python 3.15)
+numpy>=2.0
+pandas>=2.2
+yfinance>=0.2.40        # price history; optional if you drop CSVs in data/raw/
+
+# NOTE: no PyYAML. Config is TOML, parsed with stdlib `tomllib`.
+# NOTE: no matplotlib — the pipeline writes CSVs instead.
+
+# ----- Python 3.12 venv only (no wheels for 3.15) -----
+# torch>=2.4
+# alpaca-py>=0.24

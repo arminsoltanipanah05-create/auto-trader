@@ -1,0 +1,6 @@
+# Server dependencies for the paper bots (Python 3.12 on Ubuntu 24.04).
+# Deliberately no torch: that is only needed to retrain the DMN, not to trade.
+numpy>=2.0
+pandas>=2.2
+yfinance>=0.2.40
+alpaca-py>=0.24

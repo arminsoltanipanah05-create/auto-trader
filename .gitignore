@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+python/.venv/
+python/.venv-torch/
+
+# Downloaded market data (large, and regenerated on demand)
+python/data/cache/
+python/data/liquid/
+
+# Local run artefacts
+logs/
+*.log
+
+# The trade marker is committed on purpose - it is how the bot remembers it
+# already traded today when the machine running it is ephemeral.
+!state/last-trade.txt

@@ -1,0 +1,85 @@
+name: paper-rebalance
+
+# Daily ETF book. Fires four times around the US close because GitHub's
+# scheduler can run late; the gate inside the script decides which one counts
+# and the state file stops it trading twice.
+#
+# US close is 20:00 UTC in summer, 21:00 UTC in winter. Slots at 19:30, 20:00,
+# 20:30 and 21:00 cover the 45-minute window in both.
+
+on:
+  schedule:
+    - cron: '30 19 * * 1-5'
+    - cron: '0 20 * * 1-5'
+    - cron: '30 20 * * 1-5'
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: paper-rebalance
+  cancel-in-progress: false
+
+jobs:
+  rebalance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: deploy/requirements-server.txt
+
+      - name: Install dependencies
+        run: pip install -r deploy/requirements-server.txt
+
+      - name: Kill switch
+        id: kill
+        run: |
+          if [ -f python/output/KILL_SWITCH ]; then
+            echo "engaged=true" >> "$GITHUB_OUTPUT"
+            echo "Kill switch present - doing nothing."
+          else
+            echo "engaged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Market gate
+        id: gate
+        if: steps.kill.outputs.engaged == 'false'
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          if python python/paper_gate.py --marker state/last-trade.txt; then
+            echo "trade=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trade=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebalance
+        if: steps.kill.outputs.engaged == 'false' && steps.gate.outputs.trade == 'true'
+        working-directory: python
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+        run: |
+          python predict_live.py --strategy tsmom
+          python execute.py --send
+          python status.py
+
+      - name: Record the trade date
+        if: steps.kill.outputs.engaged == 'false' && steps.gate.outputs.trade == 'true'
+        run: |
+          mkdir -p state
+          TZ=America/New_York date +%F > state/last-trade.txt
+          git config user.name "auto-trader"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/last-trade.txt
+          git commit -m "paper rebalance $(cat state/last-trade.txt) [skip ci]" || echo "marker unchanged"
+          git push

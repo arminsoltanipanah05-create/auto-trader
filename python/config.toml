@@ -1,0 +1,54 @@
+# ------------------------------------------------------------
+# ETF proxy panel for the futures universe in the paper.
+# Liquid, long history, and available on Alpaca.
+# ------------------------------------------------------------
+universe = [
+  "SPY",  # US large cap equity
+  "QQQ",  # US tech equity
+  "EFA",  # developed ex-US equity
+  "EEM",  # emerging market equity
+  "TLT",  # 20y+ US treasury
+  "IEF",  # 7-10y US treasury
+  "LQD",  # investment grade credit
+  "HYG",  # high yield credit
+  "GLD",  # gold
+  "DBC",  # broad commodities
+  "UUP",  # US dollar index
+  "IYR",  # US real estate
+]
+start = "2008-01-01"
+data_source = "auto"          # auto | local | yfinance
+
+[signal]
+lookback_days = 60            # momentum lookback
+vol_window = 60               # realised vol window
+vol_target_ann = 0.15         # 15% annualised, as in the paper
+max_leverage = 1.0            # 2.0 only on a margin account, and not first
+max_weight_per_asset = 0.25   # cap; 1/12 is 0.083 so this only binds on extremes
+
+[costs]
+cost_bps = 2.0                # per unit turnover, one way
+slippage_bps = 2.0
+
+[features]
+horizons = [1, 5, 21, 63, 126, 252]
+macd_fast = 8
+macd_slow = 24
+
+[model]
+lstm_hidden = 64
+lstm_layers = 1
+dropout = 0.1
+sequence_length = 63
+learning_rate = 0.001
+batch_size = 256
+epochs = 60
+turnover_penalty = 0.02       # lambda on |change in position| during training
+ensemble_seeds = 5
+walk_forward_start = "2015-01-01"
+
+[execution]
+paper = true                  # keep true until walk-forward is done
+dry_run = true                # print orders without sending them
+max_daily_loss_pct = 0.03
+max_gross_exposure = 1.0

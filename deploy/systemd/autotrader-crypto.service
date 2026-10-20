@@ -1,0 +1,15 @@
+[Unit]
+Description=Alpaca paper crypto momentum sleeve
+Documentation=file:/opt/auto-trader/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+Group=trader
+WorkingDirectory=/opt/auto-trader/python
+EnvironmentFile=/etc/auto-trader/env
+ExecStart=/opt/auto-trader/deploy/run-crypto.sh
+TimeoutStartSec=15min
+Nice=5
