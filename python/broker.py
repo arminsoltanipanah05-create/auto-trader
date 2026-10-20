@@ -18,6 +18,7 @@ import os
 import pathlib
 
 import pre_trade
+import risk
 from pre_trade import GuardError, Quote, TradeIntent
 
 
@@ -98,11 +99,8 @@ class GuardedBroker:
         self._approvals = pathlib.Path(approvals_dir or pre_trade.APPROVALS_DIR)
         self._secret = secret if secret is not None else os.environ.get("PRETRADE_APPROVAL_SECRET", "")
 
-        if not self._paper and len(self._secret) < 32:
-            raise GuardError(
-                "approval_secret_missing",
-                "live mode requires PRETRADE_APPROVAL_SECRET (>= 32 chars) in the environment",
-            )
+        if not self._paper:
+            pre_trade._require_secret(self._secret)
 
     # ---- reads ---------------------------------------------------------- #
     def account(self):
@@ -125,11 +123,13 @@ class GuardedBroker:
     def check(self, intent: TradeIntent, equity: float | None = None) -> pre_trade.Clearance:
         """Run the guard without submitting.  Used by --dry-run and the CLI."""
         try:
+            if risk.kill_switch_engaged():
+                raise GuardError("kill_switch", "output/KILL_SWITCH is present")
             quote = self._quotes.quote(intent.symbol, intent.asset_class)
             market = self._market_for(intent)
             if equity is None:
                 equity = float(self.account().equity)
-            return pre_trade.evaluate(
+            clearance = pre_trade.evaluate(
                 intent,
                 quote=quote,
                 market=market,
@@ -137,12 +137,50 @@ class GuardedBroker:
                 cfg=self._cfg,
                 now=self._clock(),
             )
+            self._portfolio_checks(intent, clearance, float(equity))
+            return clearance
         except GuardError:
             raise
         except Exception as exc:  # noqa: BLE001 - fail closed
             raise GuardError(
                 "guard_unexpected", f"{type(exc).__name__}: {exc}"
             ) from exc
+
+    def _portfolio_checks(self, intent: TradeIntent, clearance: pre_trade.Clearance,
+                          equity: float) -> None:
+        """Daily-loss breaker for both books; gross cap for the crypto sleeve.
+
+        The equity book's gross cap is enforced upstream in execute.py against
+        the *target* weights, because a per-leg check would block the shrinking
+        half of a rebalance while the other half is still in flight.
+        """
+        account = self.account()
+        last_close = float(getattr(account, "last_equity", 0.0) or 0.0)
+        if last_close > 0 and not risk.check_daily_loss(equity, last_close, self._cfg):
+            raise GuardError(
+                "daily_loss_limit",
+                f"equity {equity:,.2f} vs prior close {last_close:,.2f} — circuit breaker",
+            )
+
+        if intent.asset_class != "crypto":
+            return
+
+        held = 0.0
+        for position in self.positions():
+            symbol = getattr(position, "symbol", "") or ""
+            klass = str(getattr(getattr(position, "asset_class", ""), "value",
+                                getattr(position, "asset_class", "")))
+            if klass == "crypto" or "/" in symbol:
+                held += abs(float(position.market_value))
+
+        projected = (held + clearance.notional) if intent.side == "buy" \
+            else max(0.0, held - clearance.notional)
+        cap = float(self._settings.get("max_gross_crypto", 0.70))
+        if equity > 0 and projected / equity > cap + 1e-9:
+            raise GuardError(
+                "gross_exposure",
+                f"crypto sleeve would be {projected / equity:.1%} of equity, cap {cap:.0%}",
+            )
 
     def submit(self, intent: TradeIntent, equity: float | None = None):
         """Validate, then (and only then) place the order."""

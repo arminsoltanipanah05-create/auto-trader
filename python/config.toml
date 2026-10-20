@@ -69,7 +69,9 @@ max_position_pct_of_volume = 0.5   # crypto: order <= 0.5% of 24h volume
 max_depth_fraction = 0.25          # equities: order <= 25% of top-of-book depth
 max_risk_pct = 1.0
 min_reward_risk = 2.0
+max_slippage_bps = 50.0         # expected slippage alone
 max_cost_bps = 100.0            # fees + expected slippage
+max_gross_crypto = 0.70         # crypto sleeve ceiling, enforced in broker.py
 
 # CoinGecko has no US-equity coverage, so only crypto is required to have a
 # snapshot. Add "us_equity" here to make unmapped equity orders fail closed too.

@@ -83,7 +83,9 @@ DEFAULTS = {
     "max_depth_fraction": 0.25,
     "max_risk_pct": 1.0,
     "min_reward_risk": 2.0,
+    "max_slippage_bps": 50.0,
     "max_cost_bps": 100.0,
+    "max_gross_crypto": 0.70,
     "coingecko_required_classes": ["crypto"],
     "coingecko_api": "https://api.coingecko.com/api/v3",
 }
@@ -330,6 +332,11 @@ def evaluate(
         raise GuardError(
             "rr_too_low", f"{reward_risk:.2f}:1 below {cfg['min_reward_risk']}:1"
         )
+    if float(intent.slippage_bps) > float(cfg["max_slippage_bps"]) + 1e-9:
+        raise GuardError(
+            "slippage_too_high",
+            f"expected slippage {intent.slippage_bps:.1f} bps > {cfg['max_slippage_bps']} bps",
+        )
     if cost_bps > float(cfg["max_cost_bps"]) + 1e-9:
         raise GuardError("cost_too_high", f"{cost_bps:.1f} bps > {cfg['max_cost_bps']} bps")
 
@@ -373,7 +380,14 @@ def _check_intent(intent: TradeIntent) -> None:
 def _check_quote(intent: TradeIntent, quote: Quote, cfg: dict, now: dt.datetime) -> float:
     if quote is None:
         raise GuardError("quote_missing", "no broker quote")
-    if not (math.isfinite(quote.bid) and math.isfinite(quote.ask)) or quote.bid <= 0 or quote.ask <= 0:
+    fields = (quote.bid, quote.ask, quote.bid_size, quote.ask_size)
+    if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in fields):
+        raise GuardError(
+            "quote_malformed",
+            f"non-finite quote bid={quote.bid!r} ask={quote.ask!r} "
+            f"sizes={quote.bid_size!r}/{quote.ask_size!r}",
+        )
+    if quote.bid <= 0 or quote.ask <= 0:
         raise GuardError("quote_missing", f"bid={quote.bid!r} ask={quote.ask!r}")
     if quote.ask < quote.bid:
         raise GuardError("quote_inconsistent", f"ask {quote.ask} < bid {quote.bid}")
@@ -399,12 +413,16 @@ def _check_quote(intent: TradeIntent, quote: Quote, cfg: dict, now: dt.datetime)
 
 def _check_liquidity(intent, quote, market, cfg, entry: float) -> float:
     notional = intent.qty * entry
+    if not math.isfinite(notional) or notional <= 0:
+        raise GuardError("bad_notional", f"notional={notional!r}")
+
     if intent.is_crypto:
         if market is None:
             raise GuardError("market_missing", f"no CoinGecko snapshot for {intent.symbol}")
-        cap = market.volume_24h * float(cfg["max_position_pct_of_volume"]) / 100.0
-        if cap <= 0:
-            raise GuardError("liquidity_unknown", f"24h volume {market.volume_24h!r}")
+        volume = market.volume_24h
+        if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
+            raise GuardError("liquidity_unknown", f"24h volume {volume!r}")
+        cap = volume * float(cfg["max_position_pct_of_volume"]) / 100.0
         if notional > cap:
             raise GuardError(
                 "insufficient_liquidity",
@@ -414,8 +432,8 @@ def _check_liquidity(intent, quote, market, cfg, entry: float) -> float:
         return min(cap, float(quote.ask_size if intent.side == "buy" else quote.bid_size) * entry)
 
     depth = (quote.ask_size * quote.ask) if intent.side == "buy" else (quote.bid_size * quote.bid)
-    if depth <= 0:
-        raise GuardError("liquidity_unknown", "no top-of-book depth")
+    if not math.isfinite(depth) or depth <= 0:
+        raise GuardError("liquidity_unknown", f"no top-of-book depth ({depth!r})")
     cap = depth * float(cfg["max_depth_fraction"])
     if notional > cap:
         raise GuardError(
@@ -438,8 +456,10 @@ def _check_divergence(intent, quote, market, cfg, now: dt.datetime) -> None:
             "stale_market",
             f"CoinGecko {market.coin_id} is {age:.1f}s old (limit {cfg['max_market_age_sec']}s)",
         )
-    if market.price <= 0:
+    if not math.isfinite(market.price) or market.price <= 0:
         raise GuardError("market_malformed", f"{market.coin_id} price={market.price!r}")
+    if not math.isfinite(market.volume_24h):
+        raise GuardError("market_malformed", f"{market.coin_id} volume={market.volume_24h!r}")
 
     mid = quote.mid
     divergence = abs(market.price - mid) / mid * 100.0
@@ -465,13 +485,27 @@ def _sign(secret: str, token: str, symbol: str, side: str, qty: str, expires_at:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def _require_secret(secret: str | None) -> str:
+    """A weak or missing secret is a hard failure, never a default."""
+    secret = secret or os.environ.get("PRETRADE_APPROVAL_SECRET", "")
+    if len(secret) < 32:
+        raise GuardError(
+            "approval_secret_missing", "PRETRADE_APPROVAL_SECRET must be >= 32 characters"
+        )
+    if len(set(secret)) < 12:
+        raise GuardError(
+            "approval_secret_weak", "secret has too little entropy (repeated characters)"
+        )
+    return secret
+
+
 def issue_approval(
     symbol: str,
     side: str,
     qty: float,
     *,
     secret: str | None = None,
-    ttl_sec: int = 900,
+    ttl_sec: int = 300,
     directory: pathlib.Path | None = None,
     now: dt.datetime | None = None,
 ) -> tuple[str, pathlib.Path]:
@@ -481,9 +515,7 @@ def issue_approval(
     absent from the GitHub Actions secrets.  An unattended cron job therefore
     cannot mint or validate a token, no matter what files it can reach.
     """
-    secret = secret or os.environ.get("PRETRADE_APPROVAL_SECRET", "")
-    if len(secret) < 32:
-        raise GuardError("approval_secret_missing", "PRETRADE_APPROVAL_SECRET must be >= 32 chars")
+    secret = _require_secret(secret)
     if side not in ("buy", "sell"):
         raise GuardError("bad_side", side)
 
@@ -516,9 +548,7 @@ def consume_approval(
     now: dt.datetime | None = None,
 ) -> None:
     """Validate and burn a token.  Raises GuardError on any mismatch."""
-    secret = secret or os.environ.get("PRETRADE_APPROVAL_SECRET", "")
-    if len(secret) < 32:
-        raise GuardError("approval_secret_missing", "no approval secret in this environment")
+    secret = _require_secret(secret)
 
     token = str(intent.approval_token or "").strip()
     if not token:

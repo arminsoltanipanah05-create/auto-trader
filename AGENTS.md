@@ -16,7 +16,13 @@ This rule is **implemented in code**, not just written here:
 | The only `client.submit_order` call | `python/broker.py` (`GuardedBroker.submit`) |
 | Callers | `python/execute.py`, `python/crypto_bot.py` — both use `guard.submit()` |
 | Tests proving blocked orders never reach the broker | `python/tests/test_pretrade.py` |
+| End-to-end dry check with a sentinel client | `python/e2e_check.py` |
 | Settings | `[pretrade]` in `python/config.toml` |
+
+The kill switch, the daily-loss circuit breaker and the crypto gross cap are
+enforced inside `GuardedBroker.check`, so both books get them. The equity book's
+gross cap is checked upstream in `execute.py` against the whole target book,
+because a per-leg check would block the shrinking half of a rebalance.
 
 If code and this document ever disagree, the code is what executes; fix the code.
 

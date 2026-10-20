@@ -28,7 +28,7 @@ import pre_trade  # noqa: E402
 from pre_trade import GuardError, Market, Quote, TradeIntent  # noqa: E402
 
 NOW = dt.datetime(2026, 10, 20, 21, 0, 0, tzinfo=dt.timezone.utc)
-SECRET = "x" * 40
+SECRET = "s3cr3t-K9fQ2mZx7Lp4Vn8Rt1Wb6Yh0Jd5Gc2Aq7Nm"
 EQUITY = 100_000.0
 
 
@@ -73,14 +73,21 @@ class FakeMarkets:
 class FakeClient:
     """Records every submit_order call.  Nothing leaves the process."""
 
-    def __init__(self):
+    def __init__(self, last_equity=None, positions=None):
         self.submitted = []
+        self.last_equity = last_equity
+        self._positions = positions or []
 
     def get_account(self):
-        return SimpleNamespace(equity=EQUITY, account_number="TEST", status="ACTIVE")
+        return SimpleNamespace(
+            equity=EQUITY,
+            last_equity=EQUITY if self.last_equity is None else self.last_equity,
+            account_number="TEST",
+            status="ACTIVE",
+        )
 
     def get_all_positions(self):
-        return []
+        return self._positions
 
     def submit_order(self, request):
         self.submitted.append(request)
@@ -88,6 +95,10 @@ class FakeClient:
             symbol=request.symbol, side=SimpleNamespace(value=request.side),
             qty=request.qty, id="fake-1", client_order_id=None,
         )
+
+
+def crypto_position(symbol="BTC/USD", value=0.0):
+    return SimpleNamespace(symbol=symbol, asset_class="crypto", market_value=str(value))
 
 
 def intent(**overrides) -> TradeIntent:
@@ -122,7 +133,7 @@ class GuardTestCase(unittest.TestCase):
         return broker.GuardedBroker(
             client or self.client,
             paper=paper,
-            cfg=cfg or {"pretrade": {}},
+            cfg=cfg or {"pretrade": {}, "execution": {"max_daily_loss_pct": 0.03}},
             quotes=quotes or FakeQuotes(quote or make_quote()),
             markets=markets or FakeMarkets(market or make_market()),
             clock=lambda: NOW,
@@ -204,6 +215,14 @@ class TestDataQuality(GuardTestCase):
         guard = self.build(quotes=FakeQuotes(error=RuntimeError("socket closed")))
         self.assert_blocked(guard, intent(), "guard_unexpected")
 
+    def test_malformed_market_blocks(self):
+        guard = self.build(market=make_market(price=float("nan")))
+        self.assert_blocked(guard, intent(), "market_malformed")
+
+    def test_malformed_quote_blocks(self):
+        guard = self.build(quote=make_quote(asize=float("nan")))
+        self.assert_blocked(guard, intent(), "quote_malformed")
+
 
 # --------------------------------------------------------------------------- #
 # liquidity
@@ -250,9 +269,31 @@ class TestIntentAndRisk(GuardTestCase):
     def test_risk_above_one_percent_blocks(self):
         self.assert_blocked(self.build(), intent(qty=1_000.0), "risk_too_high")
 
+    def test_slippage_too_high_blocks(self):
+        self.assert_blocked(self.build(), intent(slippage_bps=200.0), "slippage_too_high")
+
     def test_guard_disabled_blocks_rather_than_bypasses(self):
-        guard = self.build(cfg={"pretrade": {"enabled": False}})
+        guard = self.build(cfg={"pretrade": {"enabled": False},
+                                "execution": {"max_daily_loss_pct": 0.03}})
         self.assert_blocked(guard, intent(), "guard_disabled")
+
+
+class TestPortfolioLimits(GuardTestCase):
+    def test_daily_loss_breaker_blocks(self):
+        client = FakeClient(last_equity=110_000.0)
+        guard = self.build(client=client)
+        with self.assertRaises(GuardError) as ctx:
+            guard.submit(intent(), equity=EQUITY)
+        self.assertEqual(ctx.exception.code, "daily_loss_limit")
+        self.assertEqual(client.submitted, [])
+
+    def test_crypto_gross_cap_blocks(self):
+        client = FakeClient(positions=[crypto_position(value=69_500.0)])
+        guard = self.build(client=client)
+        with self.assertRaises(GuardError) as ctx:
+            guard.submit(intent(), equity=EQUITY)
+        self.assertEqual(ctx.exception.code, "gross_exposure")
+        self.assertEqual(client.submitted, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +330,43 @@ class TestLiveApproval(GuardTestCase):
         )
         guard = self.build(paper=False)
         self.assert_blocked(guard, intent(approval_token=token), "approval_mismatch")
+
+    def test_token_for_another_asset_blocks(self):
+        token, _ = pre_trade.issue_approval(
+            "ETH/USD", "buy", 10.0, secret=SECRET, directory=self.tmp, now=NOW
+        )
+        guard = self.build(paper=False)
+        self.assert_blocked(guard, intent(approval_token=token), "approval_mismatch")
+
+    def test_expired_token_blocks(self):
+        token, _ = pre_trade.issue_approval(
+            "BTC/USD", "buy", 10.0, secret=SECRET, directory=self.tmp,
+            now=NOW - dt.timedelta(seconds=600), ttl_sec=60,
+        )
+        guard = self.build(paper=False)
+        self.assert_blocked(guard, intent(approval_token=token), "approval_expired")
+
+    def test_weak_secret_refuses_to_construct(self):
+        with self.assertRaises(GuardError) as ctx:
+            self.build(paper=False, secret="a" * 40)
+        self.assertEqual(ctx.exception.code, "approval_secret_weak")
+
+    def test_guard_exposes_no_raw_client(self):
+        guard = self.build()
+        self.assertFalse(hasattr(guard, "client"), "GuardedBroker leaks the trading client")
+
+
+class TestKillSwitch(GuardTestCase):
+    def test_kill_switch_blocks_both_books(self):
+        import risk
+
+        original = risk.KILL_FILE
+        risk.KILL_FILE = self.tmp / "KILL_SWITCH"
+        risk.KILL_FILE.write_text("test", encoding="utf-8")
+        try:
+            self.assert_blocked(self.build(), intent(), "kill_switch")
+        finally:
+            risk.KILL_FILE = original
 
     def test_live_valid_token_submits_once_and_cannot_be_replayed(self):
         token, _ = pre_trade.issue_approval(
