@@ -51,4 +51,5 @@ walk_forward_start = "2015-01-01"
 paper = true                  # keep true until walk-forward is done
 dry_run = true                # print orders without sending them
 max_daily_loss_pct = 0.03
-max_gross_exposure = 1.0
+max_gross_exposure = 0.6      # ETF book only. Shrunk from 1.0 to free cash for
+                              # the crypto sleeve, which is cash-only on Alpaca.

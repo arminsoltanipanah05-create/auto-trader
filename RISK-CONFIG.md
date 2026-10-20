@@ -6,7 +6,7 @@ row, that's a reason to reject the platform, not to trust yourself.
 | Guardrail | Target setting | Enforced where | Set? |
 |---|---|---|---|
 | Max single position | 10% of account | TradersPost / broker | [ ] |
-| Max total exposure | 100% (no leverage) | Broker | [ ] |
+| Max total exposure | 60% ETF book + up to 70% crypto sleeve | config.toml / crypto_bot.py | [ ] |
 | Risk per trade (to ATR stop) | 1.0% of equity | Pine sizing / TradersPost | [ ] |
 | Max concurrent positions | 5 | TradersPost | [ ] |
 | Daily loss limit | -3% → halt new entries | TradersPost | [ ] |

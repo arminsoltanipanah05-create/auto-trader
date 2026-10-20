@@ -103,7 +103,14 @@ def main() -> None:
             "Kill switch engaged: delete output/KILL_SWITCH to resume trading."
         )
 
-    held = {p.symbol: float(p.market_value) for p in client.get_all_positions()}
+    # Only equities belong to this book. Crypto positions live in the same
+    # account but are managed by crypto_bot.py; treating them as ETFs here
+    # would close the entire sleeve on the next rebalance.
+    held = {
+        p.symbol: float(p.market_value)
+        for p in client.get_all_positions()
+        if str(getattr(p.asset_class, "value", p.asset_class)) == "us_equity"
+    }
     targets = {row.ticker: float(row.position) * equity for row in todays.itertuples()}
 
     orders = []
