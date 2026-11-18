@@ -25,6 +25,7 @@ import pandas as pd
 
 import broker as brokermod
 import cfg as cfgmod
+import news_intel
 import risk
 from pre_trade import GuardError, TradeIntent
 
@@ -119,11 +120,11 @@ def main() -> None:
     # Only equities belong to this book. Crypto positions live in the same
     # account but are managed by crypto_bot.py; treating them as ETFs here
     # would close the entire sleeve on the next rebalance.
-    held = {
-        p.symbol: float(p.market_value)
-        for p in guard.positions()
-        if str(getattr(p.asset_class, "value", p.asset_class)) == "us_equity"
-    }
+    held, held_qty = {}, {}
+    for p in guard.positions():
+        if str(getattr(p.asset_class, "value", p.asset_class)) == "us_equity":
+            held[p.symbol] = float(p.market_value)
+            held_qty[p.symbol] = float(p.qty or 0.0)
     targets = {row.ticker: float(row.position) * equity for row in todays.itertuples()}
 
     orders = []
@@ -214,7 +215,36 @@ def main() -> None:
             print(f"  volatility unavailable ({type(exc).__name__}); using the floor")
 
     failed = []
+    news_refused = []
+    # One news snapshot for the whole batch. It may veto, pause or halve an
+    # entry and is never allowed to enlarge one or block a trim/exit.
+    screener = news_intel.Screener(cfg.get("news") or {}, [t for t, _, _, _ in sized])
+
     for ticker, side, qty, px in sized:
+        influence = screener.for_leg(
+            ticker, side=side, current_qty=held_qty.get(ticker, 0.0),
+            qty=float(qty), signal_ref=f"tsmom-{latest}",
+        )
+        adjusted, news_why = news_intel.apply_effect(float(qty), influence)
+        if adjusted <= 0:
+            news_refused.append((ticker, news_why))
+            print(f"  news  {ticker}: skipped — {news_why}")
+            continue
+        if adjusted < qty:
+            # Round the reduced size down to whole shares. Rounding up would
+            # break the promise that news can only ever shrink an entry.
+            qty = int(round(adjusted))
+            if qty <= 0:
+                news_refused.append((ticker, "news REDUCE: below one share"))
+                print(f"  news  {ticker}: skipped — reduced below one share")
+                continue
+            print(f"  news  {ticker}: size {qty} (reduced) — {news_why}")
+        elif influence is not None and influence.decision_effect != "IGNORE":
+            print(f"  news  {ticker}: {influence.decision_effect} "
+                  f"{influence.event_type} {influence.verification} "
+                  f"conf={influence.confidence:.0f} imp={influence.impact:.0f} "
+                  f"priced_in={influence.priced_in_percent:.0f}%")
+
         dist = STOP_SIGMA * max(sigma.get(ticker, 0.0), MIN_SIGMA)
         if side == "buy":
             stop, target = px * (1 - dist), px * (1 + TARGET_MULT * dist)
@@ -246,7 +276,13 @@ def main() -> None:
             failed.append((ticker, str(exc)[:200]))
             print(f"  FAILED  {ticker}: {str(exc)[:200]}")
 
-    print(f"\nDone. {len(sized) - len(failed)}/{len(sized)} orders at {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
+    if news_refused:
+        print("\nRefused by the news layer (nothing sent):")
+        for ticker, why in news_refused:
+            print(f"  {ticker}: {why}")
+
+    sent = len(sized) - len(failed) - len(news_refused)
+    print(f"\nDone. {sent}/{len(sized)} orders at {dt.datetime.now():%Y-%m-%d %H:%M:%S}")
     if failed:
         print("Book is INCOMPLETE — rerun once the failed legs are understood:")
         for t, err in failed:

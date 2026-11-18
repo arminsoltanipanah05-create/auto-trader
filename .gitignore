@@ -20,3 +20,7 @@ logs/
 
 # Live-trade approval tokens: created by a human, consumed once, never committed
 state/approvals/
+
+# News layer runtime state (append-only decision/event logs, learned weights).
+# Local history is the input to news_review.py; it is not traded between machines.
+state/news/

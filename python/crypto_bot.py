@@ -195,6 +195,7 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
     approvals = approvals or {}
     import broker as brokermod
     import cfg as cfgmod
+    import news_intel as newsmod
     import pre_trade as guardmod
     from pre_trade import GuardError, TradeIntent
 
@@ -273,12 +274,17 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
     # sells first: spot crypto buys need the cash back before it can be reused
     plan.sort(key=lambda x: x[1])
 
+    # One news snapshot per run, judged per leg. It can veto, pause, halve or
+    # confirm what the momentum model already decided; it can never add size or
+    # touch a risk limit. A trim/exit is never blocked by news.
+    screener = newsmod.Screener(cfg.get("news") or {}, UNIVERSE)
+
     # Daily sigma from the panel already in memory. Levels, as in the ETF book,
     # come from the volatility model rather than from a discretionary view.
     rets = px.pct_change().dropna()
     sigma = rets.tail(30).std()
 
-    refused, broken = [], []
+    refused, broken, news_refused = [], [], []
     for sym, delta, price in plan:
         px_now = price if price == price else float(last_px.get(sym, 0))
         if not px_now or px_now != px_now:
@@ -289,6 +295,22 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
             continue
 
         side = "buy" if delta > 0 else "sell"
+        held_now = held_qty.get(sym.replace("/", ""), 0.0)
+        influence = screener.for_leg(
+            sym, side=side, current_qty=held_now, qty=qty,
+            signal_ref="crypto-tsmom-30d",
+        )
+        qty, news_why = newsmod.apply_effect(qty, influence)
+        if qty <= 0:
+            print(f"  news  {sym:<9} skipped — {news_why}")
+            news_refused.append((sym, news_why))
+            continue
+        if influence is not None and influence.decision_effect != "IGNORE":
+            print(f"  news  {sym:<9} {influence.decision_effect:<7} "
+                  f"{influence.event_type:<22} {influence.verification:<18} "
+                  f"conf={influence.confidence:.0f} imp={influence.impact:.0f} "
+                  f"priced_in={influence.priced_in_percent:.0f}%")
+
         dist = 2.0 * max(float(sigma.get(sym, 0.0) or 0.0), 0.01)
         if side == "buy":
             stop, target = px_now * (1 - dist), px_now * (1 + 2.5 * dist)
@@ -319,7 +341,7 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
         if sym not in approvals:
             sized = guardmod.risk_capped_qty(
                 intent,
-                current_qty=held_qty.get(sym.replace("/", ""), 0.0),
+                current_qty=held_now,
                 entry=px_now,
                 equity=equity,
                 max_risk_pct=max_risk_pct,
@@ -344,6 +366,10 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
             broken.append((sym, str(exc)[:160]))
             print(f"  FAILED  {sym}: {str(exc)[:160]}")
 
+    if news_refused:
+        print("\nStopped by the news layer (nothing sent):")
+        for s, e in news_refused:
+            print(f"  {s}: {e}")
     if refused:
         print("\nRefused by the gate (nothing sent):")
         for s, e in refused:

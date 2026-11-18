@@ -36,6 +36,7 @@ folder can place an order on its own.
 | `strategy.pine` | Paste into TradingView's Pine editor. Trend filter + pullback entry, ATR-sized risk. |
 | `alert-payload.json` | Webhook body for TradersPost. Confirm field names in their builder. |
 | `RISK-CONFIG.md` | The guardrails, and why 1% risk per trade. |
+| `NEWS-INTELLIGENCE.md` | News screen in front of the gate: tiers, verification, veto/pause rules. |
 | `GO-LIVE-CHECKLIST.md` | Staged path: alerts → paper → live tiny. |
 
 ## What you have to do yourself

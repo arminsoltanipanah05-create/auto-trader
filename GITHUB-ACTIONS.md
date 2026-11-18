@@ -20,6 +20,20 @@ Each run boots a fresh Ubuntu machine, installs dependencies (~40 s), trades,
 and disappears. Nothing is stored between runs except one file:
 `state/last-trade.txt`, which is committed back to the repo.
 
+## News layer on the runners
+
+Both workflows now run the news screen before submitting, using the same Alpaca
+keys (Alpaca News) plus the Fed/CNBC/MarketWatch RSS feeds. **No new secret is
+required.**
+
+- `state/news/` is gitignored, so the runners judge each run on that run's
+  headlines. The review loop needs accumulated history — run it locally, or add
+  `state/news` to the workflow's commit step.
+- SEC EDGAR stays dark until `sec_user_agent` in `[news]` holds a real contact
+  address; the adapter says so explicitly instead of guessing one.
+- A dead feed is printed and skipped (`required = false`), so a news outage
+  cannot silently stop the paper books. See `NEWS-INTELLIGENCE.md`.
+
 ## 1. Create an empty repository
 
 On github.com: **New repository** → name it `auto-trader` → **Private** →

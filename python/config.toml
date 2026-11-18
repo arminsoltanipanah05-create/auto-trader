@@ -77,3 +77,53 @@ max_gross_crypto = 0.70         # crypto sleeve ceiling, enforced in broker.py
 # snapshot. Add "us_equity" here to make unmapped equity orders fail closed too.
 coingecko_required_classes = ["crypto"]
 coingecko_api = "https://api.coingecko.com/api/v3"
+
+[news]
+# News Intelligence Layer. It never creates a signal and never sizes a
+# position: it can veto, pause, halve, confirm or boost a trade the strategy
+# already produced. See python/news_intel.py and the NEWS section of AGENTS.md.
+enabled = true
+
+# required = false: a dead news feed must not stop a strategy that is otherwise
+# lawful, so the run continues and logs NEWS_UNAVAILABLE. Set true to refuse all
+# new risk whenever the layer is blind.
+required = false
+
+lookback_hours = 24
+max_items = 250
+
+# Materiality gates.
+min_impact_to_pause = 55.0      # below this a story is advisory only
+min_confidence_to_veto = 60.0
+min_impact_to_veto = 60.0
+priced_in_veto = 80.0           # % of the expected move already delivered
+chase_move_pct = 3.0            # do not chase a move this large since publication
+
+# Dedupe / novelty windows.
+fresh_minutes = 90
+dedupe_hours = 72
+
+# Capability from the brief. Off by default: this repository is systematic, and
+# a standalone event trade needs a human decision, so the agent-side cron does
+# not take one on its own.
+allow_standalone = false
+
+# Operator-declared scheduled events (ISO-8601 UTC). Entries are paused inside
+# this window even before the news exists.
+pre_event_blackout_minutes = 60
+upcoming_events = []
+# Example:
+# upcoming_events = [{ at = "2026-12-10T19:00:00Z", symbols = ["SPY", "QQQ"], label = "FOMC" }]
+
+# SEC asks for a contact address; use your own. Only reaches EDGAR.
+sec_user_agent = ""
+
+# Macro releases carry no ticker, so they may only speak about these indices.
+macro_proxies = ["SPY", "QQQ"]
+
+# Tier is per feed: the Federal Reserve's own feed is Tier 1, a newspaper is not.
+rss_feeds = [
+  { name = "federal reserve", url = "https://www.federalreserve.gov/feeds/press_all.xml", tier = 1 },
+  { name = "cnbc", url = "https://www.cnbc.com/id/100003114/device/rss/rss.html", tier = 2 },
+  { name = "marketwatch", url = "http://feeds.marketwatch.com/marketwatch/topstories/", tier = 2 },
+]

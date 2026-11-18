@@ -178,6 +178,35 @@ this rule would be violated every hour by a process that cannot read it.
 
 ---
 
+## News Intelligence Layer (binding)
+
+`python/news_intel.py` adds a news screen in front of the gate. It exists to
+*remove* permission, never to grant it.
+
+- It **never creates a signal, a size or a price**. A news item may produce
+  `BOOST`, `CONFIRM`, `REDUCE`, `VETO` or `PAUSE` for a trade the strategy
+  already produced; `BOOST` changes no quantity.
+- **Tier 3 may never authorize anything** (social, aggregators, blogs, analyst
+  posts). On its own it can only pause an entry, and only when material.
+- **An exit is never blocked by news.** Risk-reducing orders pass unchanged; the
+  layer must not be able to trap the book.
+- The pre-trade gate in this file is still mandatory for every order placed by
+  an agent. Passing the news screen is not a substitute for it.
+- **Never invent** a fact, quotation, price, timestamp or source URL to satisfy
+  a score. Missing data lowers the score; it does not get filled in.
+- Every evaluated event, including `NO_TRADE`, is logged to
+  `state/news/decisions.jsonl` and `logs/news.log` with the `news_influence`
+  block before the order is submitted.
+- `allow_standalone = true` (event-driven trades with no strategy signal) and
+  `required = true` (halt new risk when the feed is blind) are **human
+  decisions**. An agent may implement and test them, not flip them on.
+- Review and reweighting use only information available at the original
+  decision: no revised timestamps, no future bars, no hindsight relabelling.
+
+Design and operating notes: `NEWS-INTELLIGENCE.md`.
+
+---
+
 ## Logging (step 12)
 
 Append one record per gate to `logs/pre-trade.log`, in this shape:
