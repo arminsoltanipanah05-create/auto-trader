@@ -13,6 +13,7 @@ This rule is **implemented in code**, not just written here:
 | Piece | Where |
 |---|---|
 | Gate logic (data, spread, liquidity, risk, RR) | `python/pre_trade.py` |
+| Risk sizing before the gate | `pre_trade.risk_capped_qty`, used by `crypto_bot.py` |
 | The only `client.submit_order` call | `python/broker.py` (`GuardedBroker.submit`) |
 | Callers | `python/execute.py`, `python/crypto_bot.py` — both use `guard.submit()` |
 | Tests proving blocked orders never reach the broker | `python/tests/test_pretrade.py` |
@@ -60,7 +61,12 @@ complete all of the following steps, in order, and show the evidence.
    - expected risk/reward ratio
    - position size
    - estimated fees and slippage
-7. Risk **no more than 1% of total portfolio value on one trade**.
+7. Risk **no more than 1% of total portfolio value on one trade**. Risk is
+   charged on the exposure the order **adds** (`qty × |entry − stop|`), not on
+   its absolute size: the part of a sell that closes or trims an existing
+   position adds no exposure, so an exit is never blocked for being larger than
+   the cap it is reducing. The bots size to this cap *before* submitting
+   (`pre_trade.risk_capped_qty`); the gate still refuses anything that exceeds it.
 8. **Reject the trade** if:
    - CoinGecko cannot be reached
    - the data is stale or missing
@@ -100,7 +106,7 @@ because a previous analysis exists. Never claim that profit is guaranteed.
 | Expected slippage vs order size | > **0.50%** |
 | Position vs 24h volume | position > **0.5%** of 24h volume |
 | Risk/reward | < **2:1** |
-| Risk per trade | > **1.0%** of total portfolio value |
+| Risk per trade (added exposure) | > **1.0%** of total portfolio value. Closing or trimming a position adds none. |
 | Time between last data pull and submit | > **60 seconds** → re-pull |
 
 If a threshold cannot be measured (e.g. no order book depth available), the

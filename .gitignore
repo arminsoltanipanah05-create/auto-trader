@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 python/.venv/
 python/.venv-torch/
+.venv/
+.venv-torch/
 
 # Downloaded market data (large, and regenerated on demand)
 python/data/cache/

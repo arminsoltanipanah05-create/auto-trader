@@ -37,6 +37,23 @@ CRYPTO_GROSS_CAP = 0.70    # hard ceiling. The vol target currently sizes the
                            # a backstop, not the sizing mechanism.
 DUST_USD = 10.0
 
+# Legitimate refusals. The gate saying no is the gate working: no order is
+# sent, the reason is logged, and the scheduled run stays green. Anything not
+# listed here is an incident — unreachable data, a malformed quote, a bug — and
+# must fail the workflow so it gets noticed instead of silently doing nothing.
+GATE_REFUSALS = {
+    "risk_too_high",
+    "rr_too_low",
+    "insufficient_liquidity",
+    "wide_spread",
+    "price_divergence",
+    "stale_market",
+    "stale_quote",
+    "bad_levels",
+    "daily_loss_limit",
+    "gross_exposure",
+}
+
 UNIVERSE = [
     "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "LINK/USD", "LTC/USD",
     "DOGE/USD", "BCH/USD", "UNI/USD", "AAVE/USD", "DOT/USD", "XRP/USD",
@@ -178,9 +195,11 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
     approvals = approvals or {}
     import broker as brokermod
     import cfg as cfgmod
+    import pre_trade as guardmod
     from pre_trade import GuardError, TradeIntent
 
     cfg = cfgmod.load()
+    max_risk_pct = float(guardmod.settings(cfg)["max_risk_pct"])
     # Orders leave this function only through GuardedBroker.submit(), which
     # runs the pre-trade gate (CoinGecko freshness, broker spread, liquidity,
     # 1% risk, 2:1 reward/risk) before the broker client is touched.
@@ -192,8 +211,13 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
     tgt_w = live_targets(px)
     last_px = px.ffill().iloc[-1]
 
-    positions = {p.symbol: float(p.market_value) for p in guard.positions()
-                 if p.asset_class == "crypto" or "/" in (p.symbol or "")}
+    positions, held_qty = {}, {}
+    for position in guard.positions():
+        symbol = position.symbol or ""
+        if position.asset_class != "crypto" and "/" not in symbol:
+            continue
+        positions[symbol] = float(position.market_value)
+        held_qty[symbol.replace("/", "")] = float(position.qty or 0.0)
     held = {s.replace("/", ""): v for s, v in positions.items()}
 
     # Alpaca crypto is cash-only: margin buying power is not spendable here.
@@ -254,11 +278,11 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
     rets = px.pct_change().dropna()
     sigma = rets.tail(30).std()
 
-    failed = []
+    refused, broken = [], []
     for sym, delta, price in plan:
         px_now = price if price == price else float(last_px.get(sym, 0))
         if not px_now or px_now != px_now:
-            failed.append((sym, "no price"))
+            broken.append((sym, "no price"))
             continue
         qty = round(abs(delta) / px_now, 8)
         if qty <= 0:
@@ -286,19 +310,47 @@ def rebalance(send: bool = False, approvals: dict | None = None) -> None:
             slippage_bps=30.0,
             approval_token=approvals.get(sym),
         )
+
+        # Size to the risk budget before the gate sees the order. Without this
+        # the vol target asks for legs whose 2-sigma stop risks 1.6-3.3% of
+        # equity, the gate correctly refuses every one, and the sleeve never
+        # moves. A leg a human approved is left at the approved size: the token
+        # is bound to that quantity, so the gate still has the final word.
+        if sym not in approvals:
+            sized = guardmod.risk_capped_qty(
+                intent,
+                current_qty=held_qty.get(sym.replace("/", ""), 0.0),
+                entry=px_now,
+                equity=equity,
+                max_risk_pct=max_risk_pct,
+            )
+            if sized <= 0:
+                print(f"  skip  {sym:<9} risk budget too small to add exposure")
+                continue
+            if sized < qty:
+                print(f"  sized {sym:<9} {qty:g} -> {sized:g} "
+                      f"({max_risk_pct:.0f}% risk cap at a {dist:.1%} stop)")
+                intent.qty = sized
+
         try:
             o = guard.submit(intent, equity=equity)
             print(f"  submitted {o.symbol} {o.side.value} {o.qty} id={o.id}")
         except GuardError as exc:
-            failed.append((sym, f"{exc.code}: {exc.detail}"))
+            (refused if exc.code in GATE_REFUSALS else broken).append(
+                (sym, f"{exc.code}: {exc.detail}")
+            )
             print(f"  BLOCKED {sym}: {exc.code} — {exc.detail}")
         except Exception as exc:  # noqa: BLE001
-            failed.append((sym, str(exc)[:160]))
+            broken.append((sym, str(exc)[:160]))
             print(f"  FAILED  {sym}: {str(exc)[:160]}")
 
-    if failed:
-        print("\nFailed legs:")
-        for s, e in failed:
+    if refused:
+        print("\nRefused by the gate (nothing sent):")
+        for s, e in refused:
+            print(f"  {s}: {e}")
+    if broken:
+        print("\nBroken legs:")
+        for s, e in broken:
             print(f"  {s}: {e}")
         raise SystemExit(1)
 

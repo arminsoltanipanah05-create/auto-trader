@@ -57,6 +57,17 @@ To force a real run today, delete the date in `state/last-trade.txt`, commit,
 and run the workflow again outside the gate window — it will still refuse,
 because the gate also checks the clock. That is the point.
 
+## What a run colour means
+
+The gate refusing an order is the gate working, not an outage:
+
+| Colour | Meaning |
+|---|---|
+| green, traded | orders passed the gate and were submitted |
+| green, refused | the gate said no (`risk_too_high`, `rr_too_low`, `wide_spread`, `insufficient_liquidity`, `price_divergence`, `stale_market`, `stale_quote`, `bad_levels`, `daily_loss_limit`, `gross_exposure`). Logged to `logs/pre-trade.log`, nothing sent |
+| green, nothing to do | already at target inside the drift band |
+| **red** | the bot could not reach a decision: CoinGecko or the broker was unreachable, a quote was malformed, or the code raised. This is the only case worth investigating, and it is why refusals do not paint the run red |
+
 ## Pausing
 
 | Want | Do |

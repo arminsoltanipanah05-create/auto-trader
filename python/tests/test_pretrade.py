@@ -97,8 +97,13 @@ class FakeClient:
         )
 
 
-def crypto_position(symbol="BTC/USD", value=0.0):
-    return SimpleNamespace(symbol=symbol, asset_class="crypto", market_value=str(value))
+def crypto_position(symbol="BTC/USD", value=0.0, qty=None):
+    return SimpleNamespace(
+        symbol=symbol,
+        asset_class="crypto",
+        market_value=str(value),
+        qty=None if qty is None else str(qty),
+    )
 
 
 def intent(**overrides) -> TradeIntent:
@@ -276,6 +281,113 @@ class TestIntentAndRisk(GuardTestCase):
         guard = self.build(cfg={"pretrade": {"enabled": False},
                                 "execution": {"max_daily_loss_pct": 0.03}})
         self.assert_blocked(guard, intent(), "guard_disabled")
+
+
+class TestRiskIsChargedOnAddedExposure(GuardTestCase):
+    """The 1% cap applies to new exposure, not to the size of an exit.
+
+    Charging a full close against the cap blocked every crypto exit the bot
+    ever tried, because a position that was legal to open stayed 'too risky' to
+    leave.  These tests pin the corrected definition.
+    """
+
+    def holding(self, qty, value=10_000.0, symbol="BTCUSD"):
+        # Alpaca spells the position BTCUSD and the order BTC/USD.
+        return FakeClient(positions=[crypto_position(symbol, value, qty)])
+
+    def test_closing_a_long_is_not_charged_the_risk_cap(self):
+        guard = self.build(client=self.holding(500.0))
+        # full size would be 500 * $3.00 = 1.5% of equity, above the 1% cap
+        order = intent(side="sell", qty=500.0, stop=103.0, target=90.0)
+        clearance = guard.check(order, equity=EQUITY)
+        self.assertEqual(clearance.risk_amount, 0.0)
+        self.assertEqual(clearance.risk_pct, 0.0)
+
+    def test_reducing_a_long_is_not_charged_the_risk_cap(self):
+        guard = self.build(client=self.holding(500.0))
+        # 400 * $3.00 = 1.2% if it were treated as new exposure
+        order = intent(side="sell", qty=400.0, stop=103.0, target=90.0)
+        self.assertEqual(guard.check(order, equity=EQUITY).risk_pct, 0.0)
+
+    def test_adding_to_a_long_is_charged_the_full_new_quantity(self):
+        guard = self.build(client=self.holding(200.0))
+        # 400 * (100.05 - 97) = $1,220 = 1.22%
+        order = intent(side="buy", qty=400.0, stop=97.0, target=108.0)
+        with self.assertRaises(GuardError) as ctx:
+            guard.check(order, equity=EQUITY)
+        self.assertEqual(ctx.exception.code, "risk_too_high")
+        self.assertIn("1.220%", ctx.exception.detail)
+
+    def test_flipping_through_zero_charges_only_the_new_side(self):
+        guard = self.build(client=self.holding(100.0))
+        # sell 150 from +100 leaves -50 short: only those 50 units are new
+        order = intent(side="sell", qty=150.0, stop=103.0, target=90.0)
+        clearance = guard.check(order, equity=EQUITY)
+        self.assertAlmostEqual(clearance.risk_amount, 50.0 * 3.0)
+        self.assertAlmostEqual(clearance.risk_pct, 0.15)
+
+    def test_unknown_position_is_charged_the_whole_order(self):
+        # No position readable -> treat the order as entirely new (fail closed).
+        guard = self.build(client=FakeClient())
+        with self.assertRaises(GuardError) as ctx:
+            guard.check(intent(qty=1_000.0), equity=EQUITY)
+        self.assertEqual(ctx.exception.code, "risk_too_high")
+
+    def test_unreadable_quantity_is_charged_the_whole_order(self):
+        client = FakeClient(positions=[SimpleNamespace(
+            symbol="BTCUSD", asset_class="crypto", market_value="50000", qty="n/a",
+        )])
+        guard = self.build(client=client)
+        with self.assertRaises(GuardError) as ctx:
+            guard.check(intent(qty=1_000.0), equity=EQUITY)
+        self.assertEqual(ctx.exception.code, "risk_too_high")
+
+
+class TestRiskSizing(unittest.TestCase):
+    """``risk_capped_qty`` is how the bots avoid orders the gate must refuse."""
+
+    def test_buy_is_clamped_to_the_risk_budget(self):
+        order = intent(side="buy", qty=1_000.0, stop=97.0, target=108.0)
+        sized = pre_trade.risk_capped_qty(
+            order, current_qty=0.0, entry=100.0, equity=EQUITY, max_risk_pct=1.0
+        )
+        # 1% of 100k over a $3 stop is 333.33 units, less the safety haircut
+        self.assertLessEqual(sized, 1_000 / 3)
+        self.assertGreater(sized, 300.0)
+        self.assertLess(sized * 3.0, 1_000.0)
+
+    def test_clamped_buy_passes_the_gate(self):
+        order = intent(side="buy", qty=1_000.0, stop=97.0, target=108.0)
+        sized = pre_trade.risk_capped_qty(
+            order, current_qty=0.0, entry=100.0, equity=EQUITY, max_risk_pct=1.0
+        )
+        order.qty = sized
+        clearance = pre_trade.evaluate(
+            order, quote=make_quote(), market=make_market(), equity=EQUITY, now=NOW
+        )
+        self.assertLessEqual(clearance.risk_pct, 1.0 + 1e-9)
+
+    def test_full_exit_is_never_clamped(self):
+        order = intent(side="sell", qty=900.0, stop=103.0, target=90.0)
+        sized = pre_trade.risk_capped_qty(
+            order, current_qty=900.0, entry=100.0, equity=EQUITY, max_risk_pct=1.0
+        )
+        self.assertEqual(sized, 900.0)
+
+    def test_trim_of_a_long_is_never_clamped(self):
+        order = intent(side="sell", qty=800.0, stop=103.0, target=90.0)
+        sized = pre_trade.risk_capped_qty(
+            order, current_qty=900.0, entry=100.0, equity=EQUITY, max_risk_pct=1.0
+        )
+        self.assertEqual(sized, 800.0)
+
+    def test_adding_to_a_long_is_clamped_to_the_increment(self):
+        order = intent(side="buy", qty=1_000.0, stop=97.0, target=108.0)
+        sized = pre_trade.risk_capped_qty(
+            order, current_qty=300.0, entry=100.0, equity=EQUITY, max_risk_pct=1.0
+        )
+        added = 300.0 + sized - 300.0
+        self.assertLessEqual(added * 3.0, 1_000.0 + 1e-6)
 
 
 class TestPortfolioLimits(GuardTestCase):

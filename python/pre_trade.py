@@ -275,6 +275,74 @@ def _parse_iso(value: str) -> dt.datetime:
 # --------------------------------------------------------------------------- #
 # validation (pure)
 # --------------------------------------------------------------------------- #
+def _added_exposure(current_qty: float, side: str, qty: float) -> float:
+    """Units of *new* exposure an order creates, given the position already held.
+
+    ``current_qty`` is signed (long positive, short negative).  A sell that
+    closes or trims a long adds no exposure: the position and its stop already
+    existed, so charging the 1% rule again would block every exit.  Only the
+    part that extends a position — or flips it through zero — is new risk.
+    """
+    current = float(current_qty or 0.0)
+    if not math.isfinite(current):
+        # Unknown position: fail closed by assuming the whole order is new.
+        return float(qty)
+
+    signed = float(qty) if side == "buy" else -float(qty)
+    new = current + signed
+    if new == 0.0:
+        return 0.0
+    if current == 0.0:
+        return abs(new)
+    if (new > 0) == (current > 0):
+        return max(0.0, abs(new) - abs(current))
+    return abs(new)          # flipped through zero: the far side is all new
+
+
+def risk_capped_qty(
+    intent: TradeIntent,
+    *,
+    current_qty: float,
+    entry: float,
+    equity: float,
+    max_risk_pct: float,
+    safety: float = 0.95,
+) -> float:
+    """Largest order that keeps *added* risk within ``max_risk_pct`` of equity.
+
+    Sizing belongs before the gate, not in it: an order that is too large is a
+    sizing mistake the bot should not make, not a trade the guard should drop.
+    Reducing an existing position is never clamped — an exit must always get
+    through.  Returns a quantity rounded *down* so it cannot land a hair over
+    the cap.
+
+    ``safety`` leaves headroom between the price used for sizing (the last
+    close) and the price the gate charges (the executable ask or bid).  Without
+    it a leg sized to exactly 1.00% is refused at 1.01% because it is about to
+    pay the spread.
+    """
+    per_unit = abs(float(entry) - float(intent.stop))
+    qty = float(intent.qty)
+    if per_unit <= 0 or equity <= 0:
+        return qty
+
+    allowed = equity * float(max_risk_pct) * float(safety) / 100.0 / per_unit
+    if _added_exposure(current_qty, intent.side, qty) <= allowed + 1e-12:
+        return qty
+
+    current = float(current_qty or 0.0)
+    signed = qty if intent.side == "buy" else -qty
+    if intent.side == "buy":
+        ceiling = (current + allowed) if current > 0 else allowed
+        signed = min(current + signed, ceiling) - current
+    else:
+        floor = (current - allowed) if current < 0 else -allowed
+        signed = max(current + signed, floor) - current
+
+    clamped = abs(signed)
+    return math.floor(clamped * 1e8) / 1e8
+
+
 def evaluate(
     intent: TradeIntent,
     *,
@@ -283,8 +351,15 @@ def evaluate(
     equity: float,
     cfg: dict | None = None,
     now: dt.datetime | None = None,
+    current_qty: float = 0.0,
 ) -> Clearance:
-    """Validate one order.  Raises GuardError on the first broken rule."""
+    """Validate one order.  Raises GuardError on the first broken rule.
+
+    ``current_qty`` is the signed position already held in ``intent.symbol``.
+    The 1% risk cap is applied to the exposure the order *adds* (see
+    :func:`_added_exposure`), so trimming or closing a position is never
+    blocked for being larger than the cap.
+    """
     cfg = settings(cfg)
     now = now or dt.datetime.now(dt.timezone.utc)
 
@@ -318,7 +393,7 @@ def evaluate(
         raise GuardError("bad_levels", "stop/target distance is zero")
 
     notional = intent.qty * entry
-    risk_amount = intent.qty * risk_per_unit
+    risk_amount = _added_exposure(current_qty, intent.side, intent.qty) * risk_per_unit
     risk_pct = risk_amount / equity * 100.0
     reward_risk = reward_per_unit / risk_per_unit
     cost_bps = float(intent.fees_bps) + float(intent.slippage_bps)

@@ -71,6 +71,16 @@ class AlpacaQuotes:
         )
 
 
+def _plain(symbol: str) -> str:
+    """Broker-agnostic symbol key.
+
+    Alpaca reports crypto *positions* as ``AAVEUSD`` but takes *orders* for
+    ``AAVE/USD``; both must resolve to the same position when the guard asks
+    what is already held.
+    """
+    return str(symbol or "").replace("/", "").upper()
+
+
 class GuardedBroker:
     def __init__(
         self,
@@ -120,6 +130,24 @@ class GuardedBroker:
             return None
         return self._markets.snapshot(coin_id)
 
+    def _position_qty(self, symbol: str) -> float:
+        """Signed quantity already held in ``symbol`` (long positive).
+
+        A position that cannot be read is treated as flat, which makes the
+        guard charge the whole order against the 1% cap — the conservative
+        direction.  Passing the real quantity is what lets an exit larger than
+        the cap through, since closing adds no new exposure.
+        """
+        wanted = _plain(symbol)
+        for position in self.positions():
+            if _plain(getattr(position, "symbol", "") or "") != wanted:
+                continue
+            try:
+                return float(getattr(position, "qty", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        return 0.0
+
     def check(self, intent: TradeIntent, equity: float | None = None) -> pre_trade.Clearance:
         """Run the guard without submitting.  Used by --dry-run and the CLI."""
         try:
@@ -136,6 +164,7 @@ class GuardedBroker:
                 equity=float(equity),
                 cfg=self._cfg,
                 now=self._clock(),
+                current_qty=self._position_qty(intent.symbol),
             )
             self._portfolio_checks(intent, clearance, float(equity))
             return clearance
