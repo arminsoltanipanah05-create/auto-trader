@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 PYTHON_DIR = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PYTHON_DIR))
@@ -487,15 +489,77 @@ class TestRssParsing(unittest.TestCase):
         self.assertEqual(rows, [])
 
 
+class TestSecAgent(unittest.TestCase):
+    """EDGAR needs a real contact; the secret path must work without one."""
+
+    def test_config_wins(self):
+        self.assertEqual(news_sources._sec_agent({"sec_user_agent": "a@b.example"}),
+                         "a@b.example")
+
+    def test_environment_fallback_for_ci(self):
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEWS_SEC_USER_AGENT", "SEC_USER_AGENT")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            os.environ["NEWS_SEC_USER_AGENT"] = "ci@example.com"
+            self.assertEqual(news_sources._sec_agent({}), "ci@example.com")
+
+    def test_empty_when_nothing_is_configured(self):
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("NEWS_SEC_USER_AGENT", "SEC_USER_AGENT")}
+        with mock.patch.dict(os.environ, clean, clear=True):
+            self.assertEqual(news_sources._sec_agent({"sec_user_agent": "  "}), "")
+
+
+class TestScoringMath(unittest.TestCase):
+    def _row(self, direction="BULLISH"):
+        decided = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=130)
+        return decided, {
+            "decided_at": decided.isoformat(), "symbol": "SPY",
+            "news_influence": {
+                "direction": direction, "priced_in_percent": 20.0,
+                "sources": ["cnbc"], "event_type": "macro_release",
+                "confidence": 70.0, "expected_duration": "intraday",
+                "decision_effect": "CONFIRM",
+            },
+        }
+
+    def test_a_closed_bullish_call_is_scored_on_forward_bars(self):
+        decided, row = self._row()
+        bars = [(decided, 100.0), (decided + dt.timedelta(hours=1), 102.0),
+                (decided + dt.timedelta(hours=2), 99.0), (decided + dt.timedelta(hours=3), 103.0)]
+        with mock.patch.object(news_review, "_bars", return_value=bars):
+            out = news_review.score_decision(row)
+        self.assertIsNotNone(out)
+        self.assertEqual(out.verdict, "CORRECT")          # +2% in the first hour
+        self.assertAlmostEqual(out.mfe, 0.03, places=6)
+        self.assertAlmostEqual(out.mae, -0.01, places=6)
+        self.assertEqual(out.sources, ("cnbc",))
+
+    def test_a_down_move_marks_a_bullish_call_wrong(self):
+        decided, row = self._row()
+        bars = [(decided, 100.0), (decided + dt.timedelta(hours=1), 97.0),
+                (decided + dt.timedelta(hours=2), 96.0)]
+        with mock.patch.object(news_review, "_bars", return_value=bars):
+            out = news_review.score_decision(row)
+        self.assertEqual(out.verdict, "WRONG")
+        self.assertAlmostEqual(out.ret, -0.04, places=6)
+
+    def test_missing_bars_leave_the_decision_unscored(self):
+        _, row = self._row()
+        with mock.patch.object(news_review, "_bars", return_value=[]):
+            self.assertIsNone(news_review.score_decision(row))
+
+
 # --------------------------------------------------------------------------- #
 # review
 # --------------------------------------------------------------------------- #
 class TestReview(unittest.TestCase):
-    def outcome(self, verdict, ret, source="reuters"):
+    def outcome(self, verdict, ret, source="reuters", effect="CONFIRM"):
         return news_review.Outcome(
             decided_at=NOW, symbol="ACME", verdict=verdict, horizon_hours=120,
             ret=ret, mfe=ret, mae=ret, priced_in=10.0, sources=(source,),
             event_type="earnings_surprise", confidence=80.0, duration="intraday",
+            effect=effect,
         )
 
     def test_summary_counts_hits(self):
@@ -505,6 +569,37 @@ class TestReview(unittest.TestCase):
         ])
         self.assertEqual(summary["observations"], 3)
         self.assertAlmostEqual(summary["by_source"]["reuters"]["hit_rate"], 0.667, places=3)
+
+    def test_summary_groups_by_decision_effect(self):
+        summary = news_review.summarise([
+            self.outcome("CORRECT", 0.01, effect="VETO"),
+            self.outcome("WRONG", -0.01, effect="VETO"),
+        ])
+        self.assertEqual(summary["by_effect"]["VETO"]["n"], 2)
+
+    def test_outcome_survives_a_round_trip(self):
+        original = self.outcome("CORRECT", 0.02, effect="REDUCE")
+        restored = news_review.Outcome.from_row(original.to_row())
+        self.assertEqual(restored.verdict, original.verdict)
+        self.assertEqual(restored.sources, original.sources)
+        self.assertEqual(restored.effect, "REDUCE")
+        self.assertEqual(restored.symbol, "ACME")
+
+    def test_decision_key_is_stable(self):
+        row = {"decided_at": "2026-11-18T10:00:00+00:00", "symbol": "SPY"}
+        self.assertEqual(news_review.decision_key(row),
+                         "2026-11-18T10:00:00+00:00|SPY")
+
+    def test_report_rewritten_only_when_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "review.json"
+            summary = {"generated_at": "later", "observations": 1}
+            self.assertTrue(news_review._materially_changed(path, summary))
+            path.write_text(json.dumps({"generated_at": "earlier", "observations": 1}),
+                            encoding="utf-8")
+            self.assertFalse(news_review._materially_changed(path, summary))
+            self.assertTrue(news_review._materially_changed(
+                path, {"generated_at": "later", "observations": 2}))
 
     def test_weights_drop_for_a_poor_record_and_never_exceed_one(self):
         poor = {"by_source": {"badblog": {"n": 20, "hit_rate": 0.1}}}

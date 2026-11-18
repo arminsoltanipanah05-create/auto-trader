@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: crypto-rebalance
@@ -53,4 +53,32 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          NEWS_SEC_USER_AGENT: ${{ secrets.NEWS_SEC_USER_AGENT }}
         run: python crypto_bot.py --send
+
+      # The news layer keeps a durable record across ephemeral runners: the
+      # decision log feeds dedupe/novelty and the review loop, and this step
+      # scores any decision whose horizon has closed since the last run.
+      - name: Score the news log and persist state
+        if: always()
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          NEWS_SEC_USER_AGENT: ${{ secrets.NEWS_SEC_USER_AGENT }}
+        run: |
+          python python/news_review.py --max-new 40 || echo "review skipped"
+          git config user.name "auto-trader"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -d state/news ]; then git add state/news; fi
+          if git diff --cached --quiet; then
+            echo "no news state change"
+          else
+            git commit -m "news state $(date -u +%FT%TZ) [skip ci]" || echo "commit skipped"
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase --autostash origin main || true
+              if git push; then pushed=true; break; fi
+              sleep 5
+            done
+            [ "$pushed" = "true" ] || echo "state not pushed this run"
+          fi

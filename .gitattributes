@@ -7,3 +7,7 @@
 *.toml text eol=lf
 *.md  text eol=lf
 *.ps1 text eol=crlf
+
+# The news logs are append-only. Both workflows can push in the same minute,
+# and a union merge keeps both sets of lines instead of failing the rebase.
+state/news/*.jsonl merge=union

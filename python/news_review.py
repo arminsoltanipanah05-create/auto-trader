@@ -1,13 +1,16 @@
 """Score the news layer against what the market actually did.
 
-    python news_review.py            # build the report and refresh weights
-    python news_review.py --dry-run  # report only, weights untouched
+    python news_review.py                 # score new decisions, refresh weights
+    python news_review.py --dry-run       # report only, nothing written
+    python news_review.py --max-new 10    # cap the price fetches in one run
 
-Only *closed* observations count: a decision is scored once the horizon that
-follows it has elapsed.  Weight updates therefore use information that existed
-when the update ran, never a revised timestamp or a future bar.  A source that
-looks good only because it was scored early is exactly the mistake this guard
-exists to prevent.
+Only *closed* observations count: a decision is scored once the 120-hour
+horizon that follows it has elapsed.  Weight updates therefore use information
+that existed when the update ran, never a revised timestamp or a future bar.
+
+Each decision is scored exactly once and appended to ``outcomes.jsonl``, so the
+hourly cron can run this cheaply: the expensive part is fetching bars for the
+few decisions that have just crossed their horizon, not re-scoring history.
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import statistics
 import news_intel
 
 HORIZONS_HOURS = (1, 24, 120)      # intraday, several days
+SCORING_HORIZON = HORIZONS_HOURS[-1]
 DIRECTION_SIGN = {
     "STRONGLY_BULLISH": 1, "BULLISH": 1, "NEUTRAL": 0,
     "BEARISH": -1, "STRONGLY_BEARISH": -1,
@@ -32,8 +36,30 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+def outcomes_path():
+    return news_intel.STATE_DIR / "outcomes.jsonl"
+
+
 def load_decisions(path=None) -> list[dict]:
     path = path or news_intel.DECISIONS_PATH
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
+
+
+def decision_key(row: dict) -> str:
+    """Stable identity of a decision, used to score each one only once."""
+    return f"{row.get('decided_at', '')}|{row.get('symbol', '')}"
+
+
+def load_outcomes(path=None) -> list[dict]:
+    path = path or outcomes_path()
     if not path.exists():
         return []
     rows = []
@@ -84,6 +110,45 @@ class Outcome:
     event_type: str
     confidence: float
     duration: str
+    effect: str = ""
+    decided_key: str = ""
+
+    def to_row(self) -> dict:
+        return {
+            "decided_key": self.decided_key or f"{self.decided_at.isoformat()}|{self.symbol}",
+            "decided_at": self.decided_at.isoformat(),
+            "symbol": self.symbol,
+            "verdict": self.verdict,
+            "horizon_hours": self.horizon_hours,
+            "ret": self.ret,
+            "mfe": self.mfe,
+            "mae": self.mae,
+            "priced_in": self.priced_in,
+            "sources": list(self.sources),
+            "event_type": self.event_type,
+            "confidence": self.confidence,
+            "duration": self.duration,
+            "effect": self.effect,
+        }
+
+    @classmethod
+    def from_row(cls, row: dict) -> "Outcome":
+        return cls(
+            decided_at=dt.datetime.fromisoformat(row["decided_at"]),
+            symbol=row["symbol"],
+            verdict=row["verdict"],
+            horizon_hours=int(row.get("horizon_hours", SCORING_HORIZON)),
+            ret=float(row.get("ret", 0.0)),
+            mfe=float(row.get("mfe", 0.0)),
+            mae=float(row.get("mae", 0.0)),
+            priced_in=float(row.get("priced_in", 0.0)),
+            sources=tuple(row.get("sources") or ()),
+            event_type=row.get("event_type", ""),
+            confidence=float(row.get("confidence", 0.0)),
+            duration=row.get("duration", ""),
+            effect=row.get("effect", ""),
+            decided_key=row.get("decided_key", ""),
+        )
 
 
 def score_decision(row: dict, *, now: dt.datetime | None = None) -> Outcome | None:
@@ -97,11 +162,10 @@ def score_decision(row: dict, *, now: dt.datetime | None = None) -> Outcome | No
     decided = dt.datetime.fromisoformat(row["decided_at"])
     if decided.tzinfo is None:
         decided = decided.replace(tzinfo=dt.timezone.utc)
-    horizon = HORIZONS_HOURS[-1]
-    if (now - decided).total_seconds() < horizon * 3600:
+    if (now - decided).total_seconds() < SCORING_HORIZON * 3600:
         return None                       # not closed yet: no peeking
 
-    bars = _bars(row["symbol"], decided, decided + dt.timedelta(hours=horizon))
+    bars = _bars(row["symbol"], decided, decided + dt.timedelta(hours=SCORING_HORIZON))
     if len(bars) < 2:
         return None
     start_px = bars[0][1]
@@ -116,12 +180,14 @@ def score_decision(row: dict, *, now: dt.datetime | None = None) -> Outcome | No
 
     return Outcome(
         decided_at=decided, symbol=row["symbol"], verdict=verdict,
-        horizon_hours=horizon, ret=final, mfe=mfe, mae=mae,
+        horizon_hours=SCORING_HORIZON, ret=final, mfe=mfe, mae=mae,
         priced_in=float(influence.get("priced_in_percent") or 0.0),
         sources=tuple(influence.get("sources") or (row.get("source") or "unknown",)),
         event_type=influence.get("event_type", ""),
         confidence=float(influence.get("confidence") or 0.0),
         duration=influence.get("expected_duration", ""),
+        effect=influence.get("decision_effect", ""),
+        decided_key=decision_key(row),
     )
 
 
@@ -160,6 +226,7 @@ def summarise(outcomes: list[Outcome]) -> dict:
         "by_event_type": table(lambda i: i.event_type or "unknown"),
         "by_confidence": table(lambda i: _bucket(i.confidence)),
         "by_duration": table(lambda i: i.duration or "unknown"),
+        "by_effect": table(lambda i: i.effect or "unknown"),
     }
 
 
@@ -182,27 +249,61 @@ def refresh_weights(summary: dict, current: dict[str, float], *,
     return weights
 
 
+def _materially_changed(path, summary: dict) -> bool:
+    """Ignore the generation timestamp when deciding whether to rewrite.
+
+    Without this, every hourly run rewrites the report and the cron commits a
+    one-line diff twenty-four times a day.
+    """
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    old.pop("generated_at", None)
+    new = {k: v for k, v in summary.items() if k != "generated_at"}
+    return old != new
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--max-new", type=int, default=40,
+                    help="cap price fetches per run (default 40)")
     args = ap.parse_args()
 
     store = news_intel.Store()
     decisions = load_decisions()
+    stored = load_outcomes()
+    already = {row.get("decided_key") or f"{row.get('decided_at')}|{row.get('symbol')}"
+               for row in stored}
     now = _now()
-    outcomes = [o for o in (score_decision(row, now=now) for row in decisions) if o]
+
+    fresh: list[Outcome] = []
+    for row in decisions:
+        if decision_key(row) in already:
+            continue
+        if len(fresh) >= args.max_new:
+            break
+        outcome = score_decision(row, now=now)
+        if outcome is not None:
+            fresh.append(outcome)
+
+    outcomes = [Outcome.from_row(row) for row in stored] + fresh
     summary = summarise(outcomes)
     summary["decisions_recorded"] = len(decisions)
-    summary["not_yet_scored"] = len(decisions) - len(outcomes)
+    summary["newly_scored"] = len(fresh)
+    summary["awaiting_horizon"] = max(0, len(decisions) - len(outcomes))
 
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
         print(f"decisions recorded : {summary['decisions_recorded']}")
-        print(f"scored (closed)    : {summary['observations']}")
-        print(f"awaiting horizon   : {summary['not_yet_scored']}\n")
-        for section in ("by_source", "by_event_type", "by_confidence", "by_duration"):
+        print(f"scored (closed)    : {summary['observations']}"
+              f"  (+{len(fresh)} this run)")
+        print(f"awaiting horizon   : {summary['awaiting_horizon']}\n")
+        for section in ("by_source", "by_event_type", "by_confidence",
+                        "by_duration", "by_effect"):
             rows = summary[section]
             if not rows:
                 continue
@@ -214,16 +315,21 @@ def main() -> None:
                       f"{s['avg_mae']*100:>8.2f}%{s['avg_priced_in']:>8.0f}")
             print()
 
+    if args.dry_run:
+        print(f"dry run: {len(fresh)} outcome(s) and the weights are unchanged")
+        return
+
+    for outcome in fresh:
+        news_intel._append_jsonl(outcomes_path(), outcome.to_row())
+
     out_path = news_intel.STATE_DIR / "review.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if _materially_changed(out_path, summary):
+        out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    if args.dry_run:
-        print("dry run: source weights unchanged")
-        return
     weights = refresh_weights(summary, store.load_weights())
-    store.save_weights(weights)
     if weights:
+        store.save_weights(weights)
         print("source weights:", json.dumps(weights, sort_keys=True))
 
 

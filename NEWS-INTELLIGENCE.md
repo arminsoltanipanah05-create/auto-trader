@@ -54,9 +54,11 @@ Adapters live in `python/news_sources.py`:
   discovery feed (which is how coin stories surface — Alpaca returns nothing for
   `SPY` or `BTC/USD` tags).
 - **SEC EDGAR** (`data.sec.gov/submissions`) — material forms only: 8-K, 10-Q,
-  10-K, S-1/S-3, 424B, SC 13D, 25-NSE, 6-K. Requires `sec_user_agent` with a
-  real contact address; without one the adapter refuses rather than inventing a
-  contact and getting a 403.
+  10-K, S-1/S-3, 424B, SC 13D, 25-NSE, 6-K. Requires a contact address in
+  `sec_user_agent` or the `NEWS_SEC_USER_AGENT` environment variable; without
+  one the adapter refuses rather than inventing a contact and getting a 403.
+  On the runners, set the repository secret `NEWS_SEC_USER_AGENT` so the
+  address never lands in a public commit.
 - **RSS** — Fed (Tier 1), CNBC and MarketWatch (Tier 2). Tier is per feed.
 
 Dead feeds are reported and the run continues. `required = false` (default)
@@ -146,6 +148,13 @@ weight of a source whose out-of-sample hit rate is poor (bounded to
 `[0.25, 1.0]`, minimum 8 observations, slow decay). Those weights feed back into
 `confidence` on the next run — and can only ever reduce it.
 
+This runs automatically: both workflows end with a step that scores any decision
+whose horizon closed since the previous run (`--max-new 40` caps the price
+calls) and commits the state back to `main`. Each decision is scored exactly
+once and appended to `state/news/outcomes.jsonl`, so the hourly crypto job costs
+a handful of bar requests, not a rescan of history. The report is only rewritten
+when its content changes, so the cron does not commit a timestamp every hour.
+
 ## Deliberate limits
 
 - **The screen runs where orders are decided, not on dry runs.** `--send` paths
@@ -160,7 +169,9 @@ weight of a source whose out-of-sample hit rate is poor (bounded to
 - **Headline-level classification.** Keyword polarity cannot read a whole
   article. It is auditable and reproducible, which is why it is used; a story
   whose meaning inverts inside the body will be scored wrongly.
-- **State does not travel between CI runs.** `state/news/` is gitignored, so the
-  scheduled runners judge each run fresh. Local runs accumulate the history the
-  review loop learns from. To persist it in CI, add `state/news` to the commit
-  step of the workflow — with the rotation in `_append_jsonl` keeping it small.
+- **State survives the runners through git.** `state/news/` is committed by the
+  workflows, so dedupe, novelty and the learned weights carry across ephemeral
+  machines. The logs rotate at 2 MB / 2,000 lines, are marked `merge=union` in
+  `.gitattributes` so two runs in the same minute append instead of conflicting,
+  and the workflows rebase before pushing. `cik_map.json` and `review.json` are
+  derived, so they stay local.

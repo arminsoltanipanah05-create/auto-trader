@@ -22,17 +22,21 @@ and disappears. Nothing is stored between runs except one file:
 
 ## News layer on the runners
 
-Both workflows now run the news screen before submitting, using the same Alpaca
-keys (Alpaca News) plus the Fed/CNBC/MarketWatch RSS feeds. **No new secret is
-required.**
+Both workflows run the news screen before submitting, using the same Alpaca
+keys (Alpaca News) plus the Fed/CNBC/MarketWatch RSS feeds.
 
-- `state/news/` is gitignored, so the runners judge each run on that run's
-  headlines. The review loop needs accumulated history — run it locally, or add
-  `state/news` to the workflow's commit step.
-- SEC EDGAR stays dark until `sec_user_agent` in `[news]` holds a real contact
-  address; the adapter says so explicitly instead of guessing one.
-- A dead feed is printed and skipped (`required = false`), so a news outage
-  cannot silently stop the paper books. See `NEWS-INTELLIGENCE.md`.
+- **State is committed.** Each run ends with a step that scores any decision
+  whose 120-hour horizon has closed, then commits `state/news/` (decision log,
+  event log, outcomes, learned weights). That is what lets dedupe, novelty and
+  source weights survive a fresh VM. The two workflows rebase before pushing;
+  the log rotates at 2 MB so the repository stays small.
+- **SEC EDGAR is one secret away.** Add `NEWS_SEC_USER_AGENT` (a real contact
+  address) under *Settings → Secrets and variables → Actions*. Until then the
+  adapter says so and the layer runs on Tier 2 only. Keeping it out of
+  `config.toml` stops a personal email being published.
+- **A dead feed never stops the book.** Failures are printed and skipped
+  (`required = false`), so a news outage cannot silently halt the paper books.
+  See `NEWS-INTELLIGENCE.md`.
 
 ## 1. Create an empty repository
 

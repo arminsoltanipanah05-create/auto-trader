@@ -68,18 +68,42 @@ jobs:
         env:
           APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
           APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          NEWS_SEC_USER_AGENT: ${{ secrets.NEWS_SEC_USER_AGENT }}
         run: |
           python predict_live.py --strategy tsmom
           python execute.py --send
           python status.py
 
-      - name: Record the trade date
-        if: steps.kill.outputs.engaged == 'false' && steps.gate.outputs.trade == 'true'
+      # Runs on every slot, trading or not: the marker records the trade date,
+      # and the news log is scored and committed so the next ephemeral runner
+      # inherits dedupe, novelty and learned source weights.
+      - name: Record state and score the news
+        if: always()
+        env:
+          APCA_API_KEY_ID: ${{ secrets.APCA_API_KEY_ID }}
+          APCA_API_SECRET_KEY: ${{ secrets.APCA_API_SECRET_KEY }}
+          NEWS_SEC_USER_AGENT: ${{ secrets.NEWS_SEC_USER_AGENT }}
+          TRADED_TODAY: ${{ steps.gate.outputs.trade }}
+          KILL_ENGAGED: ${{ steps.kill.outputs.engaged }}
         run: |
-          mkdir -p state
-          TZ=America/New_York date +%F > state/last-trade.txt
+          if [ "$KILL_ENGAGED" = "false" ] && [ "$TRADED_TODAY" = "true" ]; then
+            mkdir -p state
+            TZ=America/New_York date +%F > state/last-trade.txt
+          fi
+          python python/news_review.py --max-new 40 || echo "review skipped"
           git config user.name "auto-trader"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/last-trade.txt
-          git commit -m "paper rebalance $(cat state/last-trade.txt) [skip ci]" || echo "marker unchanged"
-          git push
+          if [ -f state/last-trade.txt ]; then git add state/last-trade.txt; fi
+          if [ -d state/news ]; then git add state/news; fi
+          if git diff --cached --quiet; then
+            echo "nothing to record"
+          else
+            git commit -m "paper state $(TZ=America/New_York date +%F) [skip ci]" || echo "commit skipped"
+            pushed=false
+            for attempt in 1 2 3; do
+              git pull --rebase --autostash origin main || true
+              if git push; then pushed=true; break; fi
+              sleep 5
+            done
+            [ "$pushed" = "true" ] || echo "state not pushed this run"
+          fi

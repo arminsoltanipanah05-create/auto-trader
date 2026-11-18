@@ -154,6 +154,23 @@ def fetch_alpaca(symbols: list[str], *, since: dt.datetime, limit: int = 250) ->
 # --------------------------------------------------------------------------- #
 # SEC EDGAR
 # --------------------------------------------------------------------------- #
+def _sec_agent(cfg: dict) -> str:
+    """Contact address for EDGAR: config first, then the environment.
+
+    The environment path exists so CI can supply it as a repository secret —
+    an email address in a public config file is a gift to scrapers.  SEC wants
+    to be able to reach whoever is polling them, so the value must be a real
+    contact, not a placeholder.
+    """
+    for candidate in (cfg.get("sec_user_agent"),
+                      os.environ.get("NEWS_SEC_USER_AGENT"),
+                      os.environ.get("SEC_USER_AGENT")):
+        value = str(candidate or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _load_cik_map(cfg: dict) -> dict[str, dict]:
     """ticker -> {cik, title}.  Cached for a week; the file is ~1 MB."""
     if CIK_CACHE.exists():
@@ -164,7 +181,7 @@ def _load_cik_map(cfg: dict) -> dict[str, dict]:
             except ValueError:
                 pass
 
-    agent = str(cfg.get("sec_user_agent") or "").strip()
+    agent = _sec_agent(cfg)
     if not agent:
         agent = "auto-trader-news research contact via repository"
     body = _get("https://www.sec.gov/files/company_tickers.json",
@@ -180,13 +197,13 @@ def _load_cik_map(cfg: dict) -> dict[str, dict]:
 
 
 def fetch_sec(symbols: list[str], *, since: dt.datetime, cfg: dict) -> list[Story]:
-    agent = str(cfg.get("sec_user_agent") or "").strip()
+    agent = _sec_agent(cfg)
     # SEC rejects anonymous clients with 403. Rather than invent a contact
     # address, say plainly that one must be configured.
     if "@" not in agent:
         raise RuntimeError(
-            "sec_user_agent is not set in [news]; SEC EDGAR requires a contact "
-            "address, e.g. \"Your Name you@example.com\""
+            "sec_user_agent is not set in [news] and NEWS_SEC_USER_AGENT is empty; "
+            "SEC EDGAR requires a contact address, e.g. \"Your Name you@example.com\""
         )
     mapping = _load_cik_map(cfg)
 
